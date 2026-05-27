@@ -1,0 +1,216 @@
+from aim_fsm import *
+
+class FINAL0(StateMachineProgram):
+	$setup {
+    	findGoal =S=> computeMid
+		findGoal =F=> {failMsg}
+		computeMid =S=> turnGoal
+		turnGoal =C=> findBall
+        findBall =F=> {NoBall}
+		findBall =S=> driveBall
+		driveBall =C=> turnBall
+		turnBall =C=> forwardBall
+		forwardBall =C=> kickBall
+		kickBall =C=> checkGoal
+		checkGoal =S=> {scoreMsg}
+        checkGoal =F=> {missMsg}
+        scoreMsg =C=> {findGoal}
+        missMsg =C=>{findGoal}
+
+        findGoal: FindGoalBarrels()
+		computeMid: ComputeGoalMidpoint()
+		turnGoal: TurnTowardGoal()
+		findBall: FindBall()
+		driveBall: DriveToBall()
+		turnBall: TurnToBall()
+		forwardBall: ForwardToBall()
+		kickBall: KickBall()
+		checkGoal: GoalCheck()
+		scoreMsg: Say('GOAL SCORED')
+		missMsg: Say('Shot missed')
+		failMsg: Say('Could not find goal')
+        NoBall: Say('Could not find the ball')
+}
+
+class FindGoalBarrels(StateNode):
+	def start(self, event=None):
+		super().start(event)
+		barrels = []
+		for obj in robot.world_map.objects.values():
+
+			if isinstance(obj, BarrelObj) and obj.is_visible:
+				barrels.append(obj)
+
+		if len(barrels) >= 2:
+			robot.goal_barrel_1 = barrels[0]
+			robot.goal_barrel_2 = barrels[1]
+
+			self.post_success()
+			return
+
+		self.post_failure()
+
+class ComputeGoalMidpoint(StateNode):
+	def start(self, event=None):
+		super().start(event)
+
+		barrel1 = robot.goal_barrel_1
+		barrel2 = robot.goal_barrel_2
+
+		mid_x = (barrel1.pose.x + barrel2.pose.x) / 2
+		mid_y = (barrel1.pose.y + barrel2.pose.y) / 2
+
+		robot.goal_midpoint = (mid_x, mid_y)
+
+		self.post_success()
+
+class TurnTowardGoal(StateNode):
+	def start(self, event=None):
+		super().start(event)
+
+		goal_x, goal_y = robot.goal_midpoint
+
+		robot_x = robot.pose.x
+		robot_y = robot.pose.y
+
+		dist_x = goal_x - robot_x
+		dist_y = goal_y - robot_y
+
+		target_heading = degrees(atan2(dist_y, dist_x))
+
+		current_heading = degrees(robot.pose.theta)
+
+		turn_angle = target_heading - current_heading
+
+		while turn_angle > 180:
+			turn_angle -= 360
+
+		while turn_angle < -180:
+			turn_angle += 360
+
+		self.turn = Turn(turn_angle)
+
+		self.turn.set_parent(self)
+		self.turn.start()
+
+	def child_completed(self, child, event):
+		self.post_completion()
+
+class FindBall(StateNode):
+	def start(self, event=None):
+		super().start(event)
+
+		ball = None
+
+		# Search for visible sports ball
+		for obj in robot.world_map.objects.values():
+
+			if isinstance(obj, SportsBallObj) and obj.is_visible:
+
+				ball = obj
+				break
+		if ball is None:
+
+			print("Could not find sports ball")
+
+			self.post_failure()
+			return
+
+		robot.target_ball = ball
+
+		self.robot.path_planner.plan_path_this_process(
+			self.robot,
+			robot.target_ball
+		)
+
+		self.robot.rrt.draw_path = self.robot.rrt.path
+
+		self.post_success()
+
+class DriveToBall(StateNode):
+    def __init__(self):
+        super().__init__(launch_path_viewer = True,
+                         launch_particle_viewer = True,
+                         speech = False)
+
+    class PathToBall(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            ob = self.robot.world_map.objects['SportsBallObj.a']
+            self.robot.path_planner.plan_path_this_process(self.robot, ob)
+            self.robot.rrt.draw_path = self.robot.rrt.path
+            print(self.robot.rrt.path)
+
+    $setup{
+        TagDetection(enabled=True) =N=> loop
+
+        loop: self.PathToBall() =N=> loop
+    }
+
+class TurnToBall(StateNode):
+	def start(self, event=None):
+		super().start(event)
+
+		current_heading = degrees(robot.pose.theta)
+		turn_angle = robot.drive_angle - current_heading
+		while turn_angle > 180:
+			turn_angle -= 360
+		while turn_angle < -180:
+			turn_angle += 360
+
+		self.turn = Turn(turn_angle)
+		self.turn.set_parent(self)
+		self.turn.start()
+
+	def child_completed(self, child, event):
+		self.post_completion()
+
+class ForwardToBall(StateNode):
+	def start(self, event=None):
+		super().start(event)
+
+		self.forward = Forward(robot.drive_distance)
+
+		self.forward.set_parent(self)
+		self.forward.start()
+
+	def child_completed(self, child, event):
+		self.post_completion()
+
+class KickBall(StateNode):
+	def start(self, event=None):
+		super().start(event)
+		self.robot.actuators['kick'].kick(self)
+		self.post_completion()
+
+class GoalCheck(StateNode):
+	goals_scored = 0
+	def start(self, event=None):
+		super().start(event)
+
+		ball = None
+		for obj in robot.world_map.objects.values():
+			if isinstance(obj, SportsBallObj) and obj.is_visible:
+				ball = obj
+				break
+
+		if ball is None:
+			self.post_failure()
+			return
+
+		b1 = robot.goal_barrel_1
+		b2 = robot.goal_barrel_2
+
+		min_x = min(b1.pose.x, b2.pose.x)
+		max_x = max(b1.pose.x, b2.pose.x)
+
+		if (min_x <= ball.pose.x <= max_x):
+
+			GoalCheck.goals_scored += 1
+
+			Say("Goals scored", {GoalCheck.goals_scored})
+			print("Goals scored:", GoalCheck.goals_scored)
+
+			self.post_success()
+		else:
+			self.post_failure()
