@@ -1,0 +1,486 @@
+from aim_fsm import *
+import math
+import time
+import json
+
+SMART_KICK_VERSION = "5.0"
+
+class FieldMemory:
+    def __init__(self, stale_timeout=30.0):
+        self.stale_timeout = stale_timeout
+        self.objects = {}
+        self.goal_center = None
+        self.goal_posts = []
+        self.balls = []
+        self.goal_width = None
+
+    def update(self, world_map):
+        now = time.time()
+        for obj_id, obj in world_map.objects.items():
+            is_vis = getattr(obj, "is_visible", False)
+            entry = {
+                "id":         obj_id,
+                "type":       self._classify(obj),
+                "obj":        obj,
+                "x":          getattr(obj, "x", None),
+                "y":          getattr(obj, "y", None),
+                "distance":   getattr(obj, "sensor_distance", None),
+                "heading":    getattr(obj, "sensor_bearing", None),
+                "is_visible": is_vis,
+                "last_seen":  now if is_vis
+                              else self.objects.get(obj_id, {}).get("last_seen", 0),
+            }
+            self.objects[obj_id] = entry
+        self.objects = {
+            k: v for k, v in self.objects.items()
+            if (now - v["last_seen"]) < (120 if v["type"] == "goalpost" else self.stale_timeout)
+        }
+        self._rebuild()
+
+    def _classify(self, obj):
+        if isinstance(obj, BlueBarrelObj):
+            return "goalpost"
+        if isinstance(obj, SportsBallObj):
+            return "ball"
+        if isinstance(obj, WallObj):
+            return "wall"
+        return "other"
+
+    def _rebuild(self):
+        self.goal_posts = [v for v in self.objects.values() if v["type"] == "goalpost"]
+        self.balls      = [v for v in self.objects.values() if v["type"] == "ball"]
+        if len(self.goal_posts) >= 2:
+            posts = sorted(self.goal_posts, key=lambda p: p["distance"] or 9999)[:2]
+            x0, y0 = posts[0].get("x"), posts[0].get("y")
+            x1, y1 = posts[1].get("x"), posts[1].get("y")
+            if None not in (x0, y0, x1, y1):
+                self.goal_center = ((x0 + x1) / 2, (y0 + y1) / 2)
+                self.goal_width = math.sqrt((x0-x1)**2 + (y0-y1)**2)
+
+    def snapshot_for_ai(self, robot_x=0, robot_y=0, robot_heading=0):
+        def r(v):
+            return round(v, 1) if v is not None else None
+        data = {
+            "robot": {"x": r(robot_x), "y": r(robot_y), "heading_deg": r(robot_heading)},
+            "goal_center": {"x": r(self.goal_center[0]), "y": r(self.goal_center[1])}
+                           if self.goal_center else None,
+            "goal_width_mm": r(self.goal_width),
+            "goal_posts": [
+                {"id": p["id"], "x": r(p["x"]), "y": r(p["y"])}
+                for p in self.goal_posts
+            ],
+            "balls": [
+                {"id": b["id"], "x": r(b["x"]), "y": r(b["y"]),
+                 "dist": r(b["distance"]), "heading_deg": r(b["heading"]),
+                 "visible": b["is_visible"]}
+                for b in self.balls
+            ],
+        }
+        return json.dumps(data)
+
+
+
+STRATEGY_PREAMBLE = """You are the brain of a small soccer robot on a field.
+The robot has found a ball and is near it. The goal is between two blue barrels.
+
+You receive JSON with the robot's position/heading, the ball position, and the goal position.
+All coordinates are in mm. Heading 0 = forward along x-axis, positive = counter-clockwise.
+
+The robot kicks STRAIGHT FORWARD. Your job is to tell it exactly what movements to make
+so the ball goes into the goal.
+
+IMPORTANT: Think about WHERE the robot is relative to the ball and goal.
+- If the robot is already between the ball and the goal's opposite side (robot → ball → goal 
+  roughly lines up), it can kick straight or with a small turn.
+- If the robot is on the SAME side as the goal (goal ← robot → ball), it needs to go AROUND
+  the ball first, then kick toward the goal.
+
+Reply with ONLY a JSON object, no markdown, no extra text:
+{
+  "plan": "kick_straight" | "go_around_left" | "go_around_right",
+  "turn_to_ball_degrees": <turn degrees to face the ball, positive=left negative=right>,
+  "aim_adjust_degrees": <after reaching ball, extra turn to aim at goal center>,
+  "reasoning": "<one sentence explaining your plan>"
+}
+
+PLANS:
+- "kick_straight": Robot faces ball, drives to it, small aim adjust, kick.
+  Use when robot-ball-goal roughly line up already.
+- "go_around_left": Robot goes around the ball's LEFT side to get behind it 
+  (relative to goal), then faces goal and kicks. Use when robot is on the goal side.
+- "go_around_right": Same but around the RIGHT side.
+
+Calculate turn_to_ball_degrees from robot heading and the angle from robot to ball.
+Calculate aim_adjust_degrees from the ball position to goal center.
+Keep all angles between -180 and 180.
+"""
+
+
+class UpdateMemory(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        self.parent.field_memory.update(robot.world_map)
+        mem = self.parent.field_memory
+        print(f"[SLAM] Posts:{len(mem.goal_posts)} Balls:{len(mem.balls)} "
+              f"Goal:{'YES' if mem.goal_center else 'no'}")
+        self.post_completion()
+
+
+class FindClosestBall(StateNode):
+    """
+    Visible ball → post_data (obj).
+    Remembered ball → post_success.
+    Nothing → post_failure.
+    """
+    def start(self, event=None):
+        super().start(event)
+        mem = self.parent.field_memory
+
+        visible = [b for b in mem.balls if b["is_visible"]]
+        if visible:
+            closest = min(visible, key=lambda b: b["distance"] or 9999)
+            self.parent.target_ball = closest
+            d = closest.get('distance')
+            h = closest.get('heading')
+            print(f"[FIND] Ball VISIBLE dist={d if d else '?'} heading={h if h else '?'}")
+            self.post_data(closest["obj"])
+            return
+
+        remembered = [b for b in mem.balls if b.get("x") is not None]
+        if remembered:
+            closest = max(remembered, key=lambda b: b["last_seen"])
+            self.parent.target_ball = closest
+            age = time.time() - closest["last_seen"]
+            print(f"[FIND] Ball REMEMBERED ({closest['x']:.0f},{closest['y']:.0f}) "
+                  f"{age:.1f}s ago")
+            self.post_success()
+            return
+
+        print("[FIND] No balls at all")
+        self.post_failure()
+
+
+class GoToRememberedBall(StateNode):
+    """Drive toward remembered ball position."""
+    def start(self, event=None):
+        super().start(event)
+        target = self.parent.target_ball
+        if not target or target.get("x") is None:
+            self.post_completion()
+            return
+
+        rx = getattr(robot, "x", 0)
+        ry = getattr(robot, "y", 0)
+        rh = getattr(robot, "heading", 0)
+
+        bx, by = target["x"], target["y"]
+        angle = math.degrees(math.atan2(by - ry, bx - rx))
+        turn = angle - rh
+        while turn > 180:  turn -= 360
+        while turn < -180: turn += 360
+
+        dist = math.sqrt((bx - rx)**2 + (by - ry)**2)
+        dist = min(dist, 300)
+        dist = max(dist, 30)
+
+        self.parent.remembered_turn = turn
+        self.parent.remembered_drive = dist
+        print(f"[REMEMBER] Turn {turn:.1f}° drive {dist:.0f}mm")
+        self.post_data(turn)
+
+
+class GetBallDistance(StateNode):
+    """Stop 40mm short of ball."""
+    def start(self, event=None):
+        super().start(event)
+        target = self.parent.target_ball
+        if target and target.get("distance"):
+            dist = max(target["distance"] - 40, 10)
+        else:
+            dist = 50
+        print(f"[DRIVE] {dist:.0f}mm to ball")
+        self.post_data(dist)
+
+
+class AskGPTStrategy(StateNode):
+    """
+    Near the ball now. Ask GPT: should I kick straight, or go around?
+    Uses AskGPT node pattern — builds query, lets parent FSM handle the call.
+    
+    Posts:
+      "kick_straight" → just aim-adjust and kick
+      "go_around_left" → circle around left, then kick
+      "go_around_right" → circle around right, then kick
+    """
+    def start(self, event=None):
+        super().start(event)
+        mem = self.parent.field_memory
+
+        # No goal known? Just kick straight, can't plan without goal
+        if mem.goal_center is None:
+            print("[GPT] No goal in memory — kicking straight")
+            self.parent.gpt_plan = "kick_straight"
+            self.parent.gpt_aim_adjust = 0
+            self.post_data("kick_straight")
+            return
+
+        rx = getattr(robot, "x", 0)
+        ry = getattr(robot, "y", 0)
+        rh = getattr(robot, "heading", 0)
+        snapshot = mem.snapshot_for_ai(rx, ry, rh)
+
+        query = (f"I'm near the ball. Here's the field state:\n{snapshot}\n"
+                 f"What should I do to score? Reply JSON only.")
+
+        print("[GPT] Asking for strategy...")
+        try:
+            robot.openai_client.set_preamble(STRATEGY_PREAMBLE)
+            response = robot.openai_client.chat(query)
+            result = self._parse(response)
+            
+            plan = result.get("plan", "kick_straight")
+            aim = result.get("aim_adjust_degrees", 0)
+            aim = max(-60, min(60, aim))
+            reason = result.get("reasoning", "")
+            
+            print(f"[GPT] Plan: {plan} | Aim adjust: {aim}° | {reason}")
+            
+            self.parent.gpt_plan = plan
+            self.parent.gpt_aim_adjust = aim
+            self.post_data(plan)
+            
+        except Exception as e:
+            print(f"[GPT] Failed ({e}), using geometry fallback")
+            plan, aim = self._geometry_fallback(mem)
+            self.parent.gpt_plan = plan
+            self.parent.gpt_aim_adjust = aim
+            self.post_data(plan)
+
+    def _geometry_fallback(self, mem):
+        """Pure math fallback when GPT is unavailable."""
+        target = self.parent.target_ball
+        if not target or not mem.goal_center:
+            return "kick_straight", 0
+
+        bx, by = target.get("x"), target.get("y")
+        gx, gy = mem.goal_center
+        if bx is None or by is None:
+            return "kick_straight", 0
+
+        rx = getattr(robot, "x", 0)
+        ry = getattr(robot, "y", 0)
+        rh = getattr(robot, "heading", 0)
+
+        # Angle from ball to goal
+        ball_to_goal = math.degrees(math.atan2(gy - by, gx - bx))
+        # Angle from robot to ball
+        robot_to_ball = math.degrees(math.atan2(by - ry, bx - rx))
+        
+        # Check if robot is roughly on the opposite side of ball from goal
+        # (i.e. robot → ball → goal is roughly a line)
+        diff = abs(robot_to_ball - ball_to_goal)
+        if diff > 180: diff = 360 - diff
+        
+        if diff < 50:
+            # Good position — robot behind ball relative to goal
+            # Calculate aim adjustment
+            angle_to_goal = math.degrees(math.atan2(gy - ry, gx - rx))
+            aim = angle_to_goal - rh
+            while aim > 180:  aim -= 360
+            while aim < -180: aim += 360
+            aim = max(-60, min(60, aim))
+            print(f"[FALLBACK] Good position, kick_straight, aim {aim:.1f}°")
+            return "kick_straight", aim
+        else:
+            # Bad position — need to go around
+            # Figure out which side: cross product of robot→ball and ball→goal
+            rbx, rby = bx - rx, by - ry
+            bgx, bgy = gx - bx, gy - by
+            cross = rbx * bgy - rby * bgx
+            side = "go_around_left" if cross > 0 else "go_around_right"
+            print(f"[FALLBACK] Wrong side, need to {side}")
+            return side, 0
+
+    def _parse(self, text):
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+        return json.loads(text)
+
+
+class DoAimAdjust(StateNode):
+    """Apply GPT's aim adjustment before kicking."""
+    def start(self, event=None):
+        super().start(event)
+        turn = self.parent.gpt_aim_adjust
+        if abs(turn) < 2:
+            print("[AIM] Aligned, kicking!")
+            self.post_completion()
+        else:
+            print(f"[AIM] Adjusting {turn:.1f}°")
+            self.post_data(turn)
+
+
+class GoAroundBall(StateNode):
+    """
+    Execute a go-around maneuver: sidestep + arc around the ball
+    so the robot ends up on the opposite side from the goal.
+    """
+    def start(self, event=None):
+        super().start(event)
+        plan = self.parent.gpt_plan
+        mem = self.parent.field_memory
+        target = self.parent.target_ball
+
+        if not target or not mem.goal_center:
+            self.post_completion()
+            return
+
+        bx, by = target.get("x"), target.get("y")
+        gx, gy = mem.goal_center
+        if bx is None or by is None:
+            self.post_completion()
+            return
+
+        rx = getattr(robot, "x", 0)
+        ry = getattr(robot, "y", 0)
+        rh = getattr(robot, "heading", 0)
+
+        # We want to end up on the far side of the ball from the goal
+        # Angle from goal to ball (the "behind" direction)
+        behind_angle = math.degrees(math.atan2(by - gy, bx - gx))
+        
+        # Target position: 130mm behind the ball (away from goal)
+        offset = 130
+        target_x = bx + offset * math.cos(math.radians(behind_angle))
+        target_y = by + offset * math.sin(math.radians(behind_angle))
+
+        # First: turn to face the target position
+        angle_to_target = math.degrees(math.atan2(target_y - ry, target_x - rx))
+        turn = angle_to_target - rh
+        while turn > 180:  turn -= 360
+        while turn < -180: turn += 360
+
+        dist = math.sqrt((target_x - rx)**2 + (target_y - ry)**2)
+        dist = min(dist, 350)
+        dist = max(dist, 50)
+
+        self.parent.around_turn = turn
+        self.parent.around_drive = dist
+
+        # After arriving behind the ball, we need to face the goal
+        face_goal_angle = math.degrees(math.atan2(gy - target_y, gx - target_x))
+        # This is the heading we want after arriving, relative to what our heading will be
+        # After driving, our heading will be approximately angle_to_target
+        self.parent.face_goal_turn = face_goal_angle - angle_to_target
+        while self.parent.face_goal_turn > 180:  self.parent.face_goal_turn -= 360
+        while self.parent.face_goal_turn < -180: self.parent.face_goal_turn += 360
+
+        direction = "LEFT" if plan == "go_around_left" else "RIGHT"
+        print(f"[AROUND] Going {direction}: turn {turn:.1f}°, drive {dist:.0f}mm, "
+              f"then face goal {self.parent.face_goal_turn:.1f}°")
+        self.post_data(turn)
+
+
+class GetAroundDrive(StateNode):
+    """Post the drive distance for the go-around maneuver."""
+    def start(self, event=None):
+        super().start(event)
+        dist = getattr(self.parent, "around_drive", 100)
+        print(f"[AROUND] Driving {dist:.0f}mm behind ball")
+        self.post_data(dist)
+
+
+class FaceGoalTurn(StateNode):
+    """After going around, turn to face the goal through the ball."""
+    def start(self, event=None):
+        super().start(event)
+        turn = getattr(self.parent, "face_goal_turn", 0)
+        if abs(turn) < 2:
+            print("[AROUND] Already facing goal")
+            self.post_completion()
+        else:
+            print(f"[AROUND] Facing goal: {turn:.1f}°")
+            self.post_data(turn)
+
+
+class smart_kick(StateMachineProgram):
+    """
+    v5 — GPT-guided scoring.
+
+    1. SLAM runs constantly, remembers goal posts (2min) and balls (30s).
+    2. See ball → charge toward it.
+    3. Stop near ball → ask GPT: "kick straight or go around?"
+    4. GPT says kick_straight → small aim adjust → kick
+       GPT says go_around_left/right → drive behind ball → face goal → kick
+    5. Loop.
+    """
+
+    def __init__(self):
+        super().__init__(
+            launch_cam_viewer=True,
+            launch_worldmap_viewer=True,
+        )
+        self.field_memory = FieldMemory(stale_timeout=30.0)
+        self.target_ball = None
+        self.gpt_plan = "kick_straight"
+        self.gpt_aim_adjust = 0
+        self.around_turn = 0
+        self.around_drive = 100
+        self.face_goal_turn = 0
+
+    $setup{
+        Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
+        loop: UpdateMemory()
+        loop =C=> find_ball
+
+        find_ball: FindClosestBall()
+        find_ball =D=> charge
+        find_ball =S=> go_remembered
+        find_ball =F=> scan
+
+        # --- No ball: turn + pause ---
+        scan: Turn(45)
+        scan =T(1.5)=> scan_pause
+        scan_pause: StateNode()
+        scan_pause =T(0.5)=> loop
+
+        # --- Remembered ball: go to last known position ---
+        go_remembered: GoToRememberedBall()
+        go_remembered =D=> Turn() =C=> Forward(150) =C=> loop
+
+        # --- Ball visible: charge toward it ---
+        charge: TurnToward()
+        charge =C=> get_dist
+
+        get_dist: GetBallDistance()
+        get_dist =D=> Forward() =C=> near_ball
+
+        near_ball: UpdateMemory()
+        near_ball =C=> ask_gpt
+
+        ask_gpt: AskGPTStrategy()
+        ask_gpt =D('kick_straight')=> aim_adjust
+        ask_gpt =D('go_around_left')=> go_around
+        ask_gpt =D('go_around_right')=> go_around
+        ask_gpt =D=> aim_adjust
+
+        aim_adjust: DoAimAdjust()
+        aim_adjust =D=> Turn() =C=> do_kick
+        aim_adjust =C=> do_kick
+
+        go_around: GoAroundBall()
+        go_around =D=> Turn() =C=> drive_around
+        go_around =C=> do_kick
+        drive_around: GetAroundDrive()
+        drive_around =D=> Forward() =C=> face_goal
+
+        face_goal: FaceGoalTurn()
+        face_goal =D=> Turn() =C=> charge_goal
+        face_goal =C=> charge_goal
+        # After going around, drive forward into the ball and kick
+        charge_goal: Forward(120)
+        charge_goal =C=> do_kick
+        do_kick: Kick()
+        do_kick =C=> loop
+    }
