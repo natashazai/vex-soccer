@@ -90,9 +90,9 @@ The robot kicks STRAIGHT FORWARD. Your job is to tell it exactly what movements 
 so the ball goes into the goal.
 
 IMPORTANT: Think about WHERE the robot is relative to the ball and goal.
-- If the robot is already between the ball and the goal's opposite side (robot → ball → goal 
+- If the robot is already between the ball and the goal's opposite side (robot > ball > goal 
   roughly lines up), it can kick straight or with a small turn.
-- If the robot is on the SAME side as the goal (goal ← robot → ball), it needs to go AROUND
+- If the robot is on the SAME side as the goal (goal < robot > ball), it needs to go AROUND
   the ball first, then kick toward the goal.
 
 Reply with ONLY a JSON object, no markdown, no extra text:
@@ -128,9 +128,9 @@ class UpdateMemory(StateNode):
 
 class FindClosestBall(StateNode):
     """
-    Visible ball → post_data (obj).
-    Remembered ball → post_success.
-    Nothing → post_failure.
+    Visible ball > post_data (obj).
+    Remembered ball > post_success.
+    Nothing > post_failure.
     """
     def start(self, event=None):
         super().start(event)
@@ -185,7 +185,7 @@ class GoToRememberedBall(StateNode):
 
         self.parent.remembered_turn = turn
         self.parent.remembered_drive = dist
-        print(f"[REMEMBER] Turn {turn:.1f}° drive {dist:.0f}mm")
+        print(f"[REMEMBER] Turn {turn:.1f} drive {dist:.0f}mm")
         self.post_data(turn)
 
 
@@ -205,12 +205,12 @@ class GetBallDistance(StateNode):
 class AskGPTStrategy(StateNode):
     """
     Near the ball now. Ask GPT: should I kick straight, or go around?
-    Uses AskGPT node pattern — builds query, lets parent FSM handle the call.
+    Uses AskGPT node pattern > builds query, lets parent FSM handle the call.
     
     Posts:
-      "kick_straight" → just aim-adjust and kick
-      "go_around_left" → circle around left, then kick
-      "go_around_right" → circle around right, then kick
+      "kick_straight" > just aim-adjust and kick
+      "go_around_left" > circle around left, then kick
+      "go_around_right" > circle around right, then kick
     """
     def start(self, event=None):
         super().start(event)
@@ -218,7 +218,7 @@ class AskGPTStrategy(StateNode):
 
         # No goal known? Just kick straight, can't plan without goal
         if mem.goal_center is None:
-            print("[GPT] No goal in memory — kicking straight")
+            print("[GPT] No goal in memory - kicking straight")
             self.parent.gpt_plan = "kick_straight"
             self.parent.gpt_aim_adjust = 0
             self.post_data("kick_straight")
@@ -243,7 +243,7 @@ class AskGPTStrategy(StateNode):
             aim = max(-60, min(60, aim))
             reason = result.get("reasoning", "")
             
-            print(f"[GPT] Plan: {plan} | Aim adjust: {aim}° | {reason}")
+            print(f"[GPT] Plan: {plan} | Aim adjust: {aim}degrees | {reason}")
             
             self.parent.gpt_plan = plan
             self.parent.gpt_aim_adjust = aim
@@ -277,23 +277,23 @@ class AskGPTStrategy(StateNode):
         robot_to_ball = math.degrees(math.atan2(by - ry, bx - rx))
         
         # Check if robot is roughly on the opposite side of ball from goal
-        # (i.e. robot → ball → goal is roughly a line)
+        # (i.e. robot > ball > goal is roughly a line)
         diff = abs(robot_to_ball - ball_to_goal)
         if diff > 180: diff = 360 - diff
         
         if diff < 50:
-            # Good position — robot behind ball relative to goal
+            # Good position - robot behind ball relative to goal
             # Calculate aim adjustment
             angle_to_goal = math.degrees(math.atan2(gy - ry, gx - rx))
             aim = angle_to_goal - rh
             while aim > 180:  aim -= 360
             while aim < -180: aim += 360
             aim = max(-60, min(60, aim))
-            print(f"[FALLBACK] Good position, kick_straight, aim {aim:.1f}°")
+            print(f"[FALLBACK] Good position, kick_straight, aim {aim:.1f} degrees")
             return "kick_straight", aim
         else:
-            # Bad position — need to go around
-            # Figure out which side: cross product of robot→ball and ball→goal
+            # Bad position - need to go around
+            # Figure out which side: cross product of robot>ball and ball>goal
             rbx, rby = bx - rx, by - ry
             bgx, bgy = gx - bx, gy - by
             cross = rbx * bgy - rby * bgx
@@ -317,7 +317,7 @@ class DoAimAdjust(StateNode):
             print("[AIM] Aligned, kicking!")
             self.post_completion()
         else:
-            print(f"[AIM] Adjusting {turn:.1f}°")
+            print(f"[AIM] Adjusting {turn:.1f} degrees")
             self.post_data(turn)
 
 
@@ -377,8 +377,8 @@ class GoAroundBall(StateNode):
         while self.parent.face_goal_turn < -180: self.parent.face_goal_turn += 360
 
         direction = "LEFT" if plan == "go_around_left" else "RIGHT"
-        print(f"[AROUND] Going {direction}: turn {turn:.1f}°, drive {dist:.0f}mm, "
-              f"then face goal {self.parent.face_goal_turn:.1f}°")
+        print(f"[AROUND] Going {direction}: turn {turn:.1f} degrees, drive {dist:.0f}mm, "
+              f"then face goal {self.parent.face_goal_turn:.1f} degrees")
         self.post_data(turn)
 
 
@@ -400,19 +400,19 @@ class FaceGoalTurn(StateNode):
             print("[AROUND] Already facing goal")
             self.post_completion()
         else:
-            print(f"[AROUND] Facing goal: {turn:.1f}°")
+            print(f"[AROUND] Facing goal: {turn:.1f} degrees")
             self.post_data(turn)
 
 
 class smart_kick(StateMachineProgram):
     """
-    v5 — GPT-guided scoring.
+    v5 - GPT-guided scoring.
 
     1. SLAM runs constantly, remembers goal posts (2min) and balls (30s).
-    2. See ball → charge toward it.
-    3. Stop near ball → ask GPT: "kick straight or go around?"
-    4. GPT says kick_straight → small aim adjust → kick
-       GPT says go_around_left/right → drive behind ball → face goal → kick
+    2. See ball > charge toward it.
+    3. Stop near ball > ask GPT: "kick straight or go around?"
+    4. GPT says kick_straight > small aim adjust > kick
+       GPT says go_around_left/right > drive behind ball > face goal > kick
     5. Loop.
     """
 
