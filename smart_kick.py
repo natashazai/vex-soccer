@@ -3,8 +3,6 @@ import math
 import time
 import json
 
-SMART_KICK_VERSION = "5.0"
-TEAM = "blue"
 
 class FieldMemory:
     def __init__(self, stale_timeout=30.0):
@@ -91,9 +89,9 @@ The robot kicks STRAIGHT FORWARD. Your job is to tell it exactly what movements 
 so the ball goes into the goal.
 
 IMPORTANT: Think about WHERE the robot is relative to the ball and goal.
-- If the robot is already between the ball and the goal's opposite side (robot > ball > goal 
+- If the robot is already between the ball and the goal's opposite side (robot → ball → goal 
   roughly lines up), it can kick straight or with a small turn.
-- If the robot is on the SAME side as the goal (goal < robot > ball), it needs to go AROUND
+- If the robot is on the SAME side as the goal (goal ← robot → ball), it needs to go AROUND
   the ball first, then kick toward the goal.
 
 Reply with ONLY a JSON object, no markdown, no extra text:
@@ -127,24 +125,11 @@ class UpdateMemory(StateNode):
         self.post_completion()
 
 
-#class KeepScoresInMind(StateNode):
- #   def start(self, event=None):
-  #      super().start(event)
-   #     blue_team_score = 0
-    #    orange_team_score = 0
-     #   if TEAM == "blue":
-     #       #call func
-      #      keep_track_of_orange()
-      #  else TEAM == "orange"
-       #     keep_track_of_blue()
-       # self.post_completion()
-
-
 class FindClosestBall(StateNode):
     """
-    Visible ball > post_data (obj).
-    Remembered ball > post_success.
-    Nothing > post_failure.
+    Visible ball → post_data (obj).
+    Remembered ball → post_success.
+    Nothing → post_failure.
     """
     def start(self, event=None):
         super().start(event)
@@ -199,7 +184,7 @@ class GoToRememberedBall(StateNode):
 
         self.parent.remembered_turn = turn
         self.parent.remembered_drive = dist
-        print(f"[REMEMBER] Turn {turn:.1f} drive {dist:.0f}mm")
+        print(f"[REMEMBER] Turn {turn:.1f}° drive {dist:.0f}mm")
         self.post_data(turn)
 
 
@@ -219,12 +204,12 @@ class GetBallDistance(StateNode):
 class AskGPTStrategy(StateNode):
     """
     Near the ball now. Ask GPT: should I kick straight, or go around?
-    Uses AskGPT node pattern > builds query, lets parent FSM handle the call.
+    Uses AskGPT node pattern — builds query, lets parent FSM handle the call.
     
     Posts:
-      "kick_straight" > just aim-adjust and kick
-      "go_around_left" > circle around left, then kick
-      "go_around_right" > circle around right, then kick
+      "kick_straight" → just aim-adjust and kick
+      "go_around_left" → circle around left, then kick
+      "go_around_right" → circle around right, then kick
     """
     def start(self, event=None):
         super().start(event)
@@ -232,7 +217,7 @@ class AskGPTStrategy(StateNode):
 
         # No goal known? Just kick straight, can't plan without goal
         if mem.goal_center is None:
-            print("[GPT] No goal in memory - kicking straight")
+            print("[GPT] No goal in memory — kicking straight")
             self.parent.gpt_plan = "kick_straight"
             self.parent.gpt_aim_adjust = 0
             self.post_data("kick_straight")
@@ -257,7 +242,7 @@ class AskGPTStrategy(StateNode):
             aim = max(-60, min(60, aim))
             reason = result.get("reasoning", "")
             
-            print(f"[GPT] Plan: {plan} | Aim adjust: {aim}degrees | {reason}")
+            print(f"[GPT] Plan: {plan} | Aim adjust: {aim}° | {reason}")
             
             self.parent.gpt_plan = plan
             self.parent.gpt_aim_adjust = aim
@@ -291,23 +276,23 @@ class AskGPTStrategy(StateNode):
         robot_to_ball = math.degrees(math.atan2(by - ry, bx - rx))
         
         # Check if robot is roughly on the opposite side of ball from goal
-        # (i.e. robot > ball > goal is roughly a line)
+        # (i.e. robot → ball → goal is roughly a line)
         diff = abs(robot_to_ball - ball_to_goal)
         if diff > 180: diff = 360 - diff
         
         if diff < 50:
-            # Good position - robot behind ball relative to goal
+            # Good position — robot behind ball relative to goal
             # Calculate aim adjustment
             angle_to_goal = math.degrees(math.atan2(gy - ry, gx - rx))
             aim = angle_to_goal - rh
             while aim > 180:  aim -= 360
             while aim < -180: aim += 360
             aim = max(-60, min(60, aim))
-            print(f"[FALLBACK] Good position, kick_straight, aim {aim:.1f} degrees")
+            print(f"[FALLBACK] Good position, kick_straight, aim {aim:.1f}°")
             return "kick_straight", aim
         else:
-            # Bad position - need to go around
-            # Figure out which side: cross product of robot>ball and ball>goal
+            # Bad position — need to go around
+            # Figure out which side: cross product of robot→ball and ball→goal
             rbx, rby = bx - rx, by - ry
             bgx, bgy = gx - bx, gy - by
             cross = rbx * bgy - rby * bgx
@@ -331,7 +316,7 @@ class DoAimAdjust(StateNode):
             print("[AIM] Aligned, kicking!")
             self.post_completion()
         else:
-            print(f"[AIM] Adjusting {turn:.1f} degrees")
+            print(f"[AIM] Adjusting {turn:.1f}°")
             self.post_data(turn)
 
 
@@ -391,8 +376,8 @@ class GoAroundBall(StateNode):
         while self.parent.face_goal_turn < -180: self.parent.face_goal_turn += 360
 
         direction = "LEFT" if plan == "go_around_left" else "RIGHT"
-        print(f"[AROUND] Going {direction}: turn {turn:.1f} degrees, drive {dist:.0f}mm, "
-              f"then face goal {self.parent.face_goal_turn:.1f} degrees")
+        print(f"[AROUND] Going {direction}: turn {turn:.1f}°, drive {dist:.0f}mm, "
+              f"then face goal {self.parent.face_goal_turn:.1f}°")
         self.post_data(turn)
 
 
@@ -414,19 +399,19 @@ class FaceGoalTurn(StateNode):
             print("[AROUND] Already facing goal")
             self.post_completion()
         else:
-            print(f"[AROUND] Facing goal: {turn:.1f} degrees")
+            print(f"[AROUND] Facing goal: {turn:.1f}°")
             self.post_data(turn)
 
 
 class smart_kick(StateMachineProgram):
     """
-    v5 - GPT-guided scoring.
+    v5 — GPT-guided scoring.
 
     1. SLAM runs constantly, remembers goal posts (2min) and balls (30s).
-    2. See ball > charge toward it.
-    3. Stop near ball > ask GPT: "kick straight or go around?"
-    4. GPT says kick_straight > small aim adjust > kick
-       GPT says go_around_left/right > drive behind ball > face goal > kick
+    2. See ball → charge toward it.
+    3. Stop near ball → ask GPT: "kick straight or go around?"
+    4. GPT says kick_straight → small aim adjust → kick
+       GPT says go_around_left/right → drive behind ball → face goal → kick
     5. Loop.
     """
 
@@ -443,58 +428,178 @@ class smart_kick(StateMachineProgram):
         self.around_drive = 100
         self.face_goal_turn = 0
 
-    $setup{
-        Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
-        loop: UpdateMemory()
-        loop =C=> find_ball
-
-        find_ball: FindClosestBall()
-        find_ball =D=> charge
-        find_ball =S=> go_remembered
-        find_ball =F=> scan
-
-        # --- No ball: turn + pause ---
-        scan: Turn(45)
-        scan =T(1.5)=> scan_pause
-        scan_pause: StateNode()
-        scan_pause =T(0.5)=> loop
-
-        # --- Remembered ball: go to last known position ---
-        go_remembered: GoToRememberedBall()
-        go_remembered =D=> Turn() =C=> Forward(150) =C=> loop
-
-        # --- Ball visible: charge toward it ---
-        charge: TurnToward()
-        charge =C=> get_dist
-
-        get_dist: GetBallDistance()
-        get_dist =D=> Forward() =C=> near_ball
-
-        near_ball: UpdateMemory()
-        near_ball =C=> ask_gpt
-
-        ask_gpt: AskGPTStrategy()
-        ask_gpt =D('kick_straight')=> aim_adjust
-        ask_gpt =D('go_around_left')=> go_around
-        ask_gpt =D('go_around_right')=> go_around
-        ask_gpt =D=> aim_adjust
-
-        aim_adjust: DoAimAdjust()
-        aim_adjust =D=> Turn() =C=> do_kick
-        aim_adjust =C=> do_kick
-
-        go_around: GoAroundBall()
-        go_around =D=> Turn() =C=> drive_around
-        go_around =C=> do_kick
-        drive_around: GetAroundDrive()
-        drive_around =D=> Forward() =C=> face_goal
-
-        face_goal: FaceGoalTurn()
-        face_goal =D=> Turn() =C=> charge_goal
-        face_goal =C=> charge_goal
-        # After going around, drive forward into the ball and kick
-        charge_goal: Forward(120)
-        charge_goal =C=> do_kick
-        do_kick: Kick()
-        do_kick =C=> loop
-    }
+    def setup(self):
+        #         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
+        #         loop: UpdateMemory()
+        #         loop =C=> find_ball
+        # 
+        #         find_ball: FindClosestBall()
+        #         find_ball =D=> charge
+        #         find_ball =S=> go_remembered
+        #         find_ball =F=> scan
+        # 
+        #         # --- No ball: turn + pause ---
+        #         scan: Turn(45)
+        #         scan =T(1.5)=> scan_pause
+        #         scan_pause: StateNode()
+        #         scan_pause =T(0.5)=> loop
+        # 
+        #         # --- Remembered ball: go to last known position ---
+        #         go_remembered: GoToRememberedBall()
+        #         go_remembered =D=> Turn() =C=> Forward(150) =C=> loop
+        # 
+        #         # --- Ball visible: charge toward it ---
+        #         charge: TurnToward()
+        #         charge =C=> get_dist
+        # 
+        #         get_dist: GetBallDistance()
+        #         get_dist =D=> Forward() =C=> near_ball
+        # 
+        #         near_ball: UpdateMemory()
+        #         near_ball =C=> ask_gpt
+        # 
+        #         ask_gpt: AskGPTStrategy()
+        #         ask_gpt =D('kick_straight')=> aim_adjust
+        #         ask_gpt =D('go_around_left')=> go_around
+        #         ask_gpt =D('go_around_right')=> go_around
+        #         ask_gpt =D=> aim_adjust
+        # 
+        #         aim_adjust: DoAimAdjust()
+        #         aim_adjust =D=> Turn() =C=> do_kick
+        #         aim_adjust =C=> do_kick
+        # 
+        #         go_around: GoAroundBall()
+        #         go_around =D=> Turn() =C=> drive_around
+        #         go_around =C=> do_kick
+        #         drive_around: GetAroundDrive()
+        #         drive_around =D=> Forward() =C=> face_goal
+        # 
+        #         face_goal: FaceGoalTurn()
+        #         face_goal =D=> Turn() =C=> charge_goal
+        #         face_goal =C=> charge_goal
+        #         # After going around, drive forward into the ball and kick
+        #         charge_goal: Forward(120)
+        #         charge_goal =C=> do_kick
+        #         do_kick: Kick()
+        #         do_kick =C=> loop
+        
+        # Code generated by genfsm on Wed May 27 12:31:58 2026:
+        
+        glow1 = Glow(vex.LightType.ALL_LEDS, 0, 0, 255) .set_name("glow1") .set_parent(self)
+        loop = UpdateMemory() .set_name("loop") .set_parent(self)
+        find_ball = FindClosestBall() .set_name("find_ball") .set_parent(self)
+        scan = Turn(45) .set_name("scan") .set_parent(self)
+        scan_pause = StateNode() .set_name("scan_pause") .set_parent(self)
+        go_remembered = GoToRememberedBall() .set_name("go_remembered") .set_parent(self)
+        turn1 = Turn() .set_name("turn1") .set_parent(self)
+        forward1 = Forward(150) .set_name("forward1") .set_parent(self)
+        charge = TurnToward() .set_name("charge") .set_parent(self)
+        get_dist = GetBallDistance() .set_name("get_dist") .set_parent(self)
+        forward2 = Forward() .set_name("forward2") .set_parent(self)
+        near_ball = UpdateMemory() .set_name("near_ball") .set_parent(self)
+        ask_gpt = AskGPTStrategy() .set_name("ask_gpt") .set_parent(self)
+        aim_adjust = DoAimAdjust() .set_name("aim_adjust") .set_parent(self)
+        turn2 = Turn() .set_name("turn2") .set_parent(self)
+        go_around = GoAroundBall() .set_name("go_around") .set_parent(self)
+        turn3 = Turn() .set_name("turn3") .set_parent(self)
+        drive_around = GetAroundDrive() .set_name("drive_around") .set_parent(self)
+        forward3 = Forward() .set_name("forward3") .set_parent(self)
+        face_goal = FaceGoalTurn() .set_name("face_goal") .set_parent(self)
+        turn4 = Turn() .set_name("turn4") .set_parent(self)
+        charge_goal = Forward(120) .set_name("charge_goal") .set_parent(self)
+        do_kick = Kick() .set_name("do_kick") .set_parent(self)
+        
+        completiontrans1 = CompletionTrans() .set_name("completiontrans1")
+        completiontrans1 .add_sources(glow1) .add_destinations(loop)
+        
+        completiontrans2 = CompletionTrans() .set_name("completiontrans2")
+        completiontrans2 .add_sources(loop) .add_destinations(find_ball)
+        
+        datatrans1 = DataTrans() .set_name("datatrans1")
+        datatrans1 .add_sources(find_ball) .add_destinations(charge)
+        
+        successtrans1 = SuccessTrans() .set_name("successtrans1")
+        successtrans1 .add_sources(find_ball) .add_destinations(go_remembered)
+        
+        failuretrans1 = FailureTrans() .set_name("failuretrans1")
+        failuretrans1 .add_sources(find_ball) .add_destinations(scan)
+        
+        timertrans1 = TimerTrans(1.5) .set_name("timertrans1")
+        timertrans1 .add_sources(scan) .add_destinations(scan_pause)
+        
+        timertrans2 = TimerTrans(0.5) .set_name("timertrans2")
+        timertrans2 .add_sources(scan_pause) .add_destinations(loop)
+        
+        datatrans2 = DataTrans() .set_name("datatrans2")
+        datatrans2 .add_sources(go_remembered) .add_destinations(turn1)
+        
+        completiontrans3 = CompletionTrans() .set_name("completiontrans3")
+        completiontrans3 .add_sources(turn1) .add_destinations(forward1)
+        
+        completiontrans4 = CompletionTrans() .set_name("completiontrans4")
+        completiontrans4 .add_sources(forward1) .add_destinations(loop)
+        
+        completiontrans5 = CompletionTrans() .set_name("completiontrans5")
+        completiontrans5 .add_sources(charge) .add_destinations(get_dist)
+        
+        datatrans3 = DataTrans() .set_name("datatrans3")
+        datatrans3 .add_sources(get_dist) .add_destinations(forward2)
+        
+        completiontrans6 = CompletionTrans() .set_name("completiontrans6")
+        completiontrans6 .add_sources(forward2) .add_destinations(near_ball)
+        
+        completiontrans7 = CompletionTrans() .set_name("completiontrans7")
+        completiontrans7 .add_sources(near_ball) .add_destinations(ask_gpt)
+        
+        datatrans4 = DataTrans('kick_straight') .set_name("datatrans4")
+        datatrans4 .add_sources(ask_gpt) .add_destinations(aim_adjust)
+        
+        datatrans5 = DataTrans('go_around_left') .set_name("datatrans5")
+        datatrans5 .add_sources(ask_gpt) .add_destinations(go_around)
+        
+        datatrans6 = DataTrans('go_around_right') .set_name("datatrans6")
+        datatrans6 .add_sources(ask_gpt) .add_destinations(go_around)
+        
+        datatrans7 = DataTrans() .set_name("datatrans7")
+        datatrans7 .add_sources(ask_gpt) .add_destinations(aim_adjust)
+        
+        datatrans8 = DataTrans() .set_name("datatrans8")
+        datatrans8 .add_sources(aim_adjust) .add_destinations(turn2)
+        
+        completiontrans8 = CompletionTrans() .set_name("completiontrans8")
+        completiontrans8 .add_sources(turn2) .add_destinations(do_kick)
+        
+        completiontrans9 = CompletionTrans() .set_name("completiontrans9")
+        completiontrans9 .add_sources(aim_adjust) .add_destinations(do_kick)
+        
+        datatrans9 = DataTrans() .set_name("datatrans9")
+        datatrans9 .add_sources(go_around) .add_destinations(turn3)
+        
+        completiontrans10 = CompletionTrans() .set_name("completiontrans10")
+        completiontrans10 .add_sources(turn3) .add_destinations(drive_around)
+        
+        completiontrans11 = CompletionTrans() .set_name("completiontrans11")
+        completiontrans11 .add_sources(go_around) .add_destinations(do_kick)
+        
+        datatrans10 = DataTrans() .set_name("datatrans10")
+        datatrans10 .add_sources(drive_around) .add_destinations(forward3)
+        
+        completiontrans12 = CompletionTrans() .set_name("completiontrans12")
+        completiontrans12 .add_sources(forward3) .add_destinations(face_goal)
+        
+        datatrans11 = DataTrans() .set_name("datatrans11")
+        datatrans11 .add_sources(face_goal) .add_destinations(turn4)
+        
+        completiontrans13 = CompletionTrans() .set_name("completiontrans13")
+        completiontrans13 .add_sources(turn4) .add_destinations(charge_goal)
+        
+        completiontrans14 = CompletionTrans() .set_name("completiontrans14")
+        completiontrans14 .add_sources(face_goal) .add_destinations(charge_goal)
+        
+        completiontrans15 = CompletionTrans() .set_name("completiontrans15")
+        completiontrans15 .add_sources(charge_goal) .add_destinations(do_kick)
+        
+        completiontrans16 = CompletionTrans() .set_name("completiontrans16")
+        completiontrans16 .add_sources(do_kick) .add_destinations(loop)
+        
+        return self
