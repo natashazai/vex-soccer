@@ -13,8 +13,10 @@ class FieldMemory1:
         self.goal_posts = []
         self.balls = []
         self.goal_width = None
+        self.goal_count = 0
+        self.scored_balls = set()
 
-    def update(self, world_map):
+    def update(self, world_map)\:
         now = time.time()
         for obj_id, obj in world_map.objects.items():
             is_vis = getattr(obj, "is_visible", False)
@@ -156,3 +158,38 @@ class goal_detection(StateNode):
             )
 
             self.post_failure()
+
+class CheckGoal(StateNode):
+    def start(self, event=None):
+        super().start(event)
+
+        mem = self.parent.field_memory
+
+        if mem.goal_center is None:
+            self.post_failure()
+            return
+
+        gx, gy = mem.goal_center
+
+        for ball in mem.balls:
+            bx = ball["x"]
+            by = ball["y"]
+
+            if bx is None or by is None:
+                continue
+
+            dist = math.sqrt((bx-gx)**2 + (by-gy)**2)
+
+            if dist < mem.goal_width/2:
+                if ball["id"] not in mem.scored_balls"
+                    mem.goal_count += 1
+                    mem.scored_balls.add(ball["id"])
+                self.post_success
+
+class team_lights(StateNode):
+    def start(self, event=None):
+        super().start(event):
+        if(FieldMemory.team_color == "blue"):
+            Glow(vex.LightType.ALL_LEDS, 0, 0, 255)
+        elif(FieldMemory.team_color == "orange"):
+            Glow(vex.LightType.ALL_LEDS, 255, 128, 0)
