@@ -449,9 +449,8 @@ class smart_kick(StateMachineProgram):
     $setup{
         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
         loop: UpdateMemory()
-        loop =C=> team_lights
-        
         team_lights: team_lights()
+        loop =C=> team_lights
         team_lights =C=> find_goal
 
         find_goal:goal_detection()
