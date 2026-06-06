@@ -2,7 +2,7 @@ from aim_fsm import *
 import math
 import time
 import json
-from goat_detection.fsm import *
+from goal_detection.fsm import *
 
 SMART_KICK_VERSION = "5.1"
 TEAM = "blue"
