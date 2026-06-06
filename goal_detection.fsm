@@ -184,6 +184,8 @@ class CheckGoal(StateNode):
                 if ball["id"] not in mem.scored_balls"
                     mem.goal_count += 1
                     mem.scored_balls.add(ball["id"])
+                    print({mem.goal_count})
+
                 self.post_success
 
 class team_lights(StateNode):
