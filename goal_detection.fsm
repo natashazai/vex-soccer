@@ -6,7 +6,6 @@ import json
 
 class FieldMemory1:
     def __init__(self, stale_timeout=30.0):
-        self.team_color = "orange" # "blue"
         self.stale_timeout = stale_timeout
         self.objects = {}
         self.goal_center = None
@@ -51,12 +50,12 @@ class FieldMemory1:
         return "other"
 
     def _rebuild(self):
-        if self.team_color.lower() == "orange":
+        if self.TEAM.lower() == "orange":
             self.goal_posts = [v for v in self.objects.values() if v["type"] == "orange_goal"]
-        elif self.team_color.lower() == "blue":
+        elif self.TEAM.lower() == "blue":
             self.goal_posts = [v for v in self.objects.values() if v["type"] == "blue_goal"]
         else:
-            print(f"ERROR: '{self.team_color}' is not a valid team color, choose orange or blue.")
+            print(f"ERROR: '{TEAM}' is not a valid team color, choose orange or blue.")
 
         self.balls      = [v for v in self.objects.values() if v["type"] == "ball"]
         if len(self.goal_posts) >= 2:
@@ -191,7 +190,9 @@ class CheckGoal(StateNode):
 class team_lights(StateNode):
     def start(self, event=None):
         super().start(event):
-        if(FieldMemory.team_color == "blue"):
+        if(TEAM == "blue"):
             Glow(vex.LightType.ALL_LEDS, 0, 0, 255)
-        elif(FieldMemory.team_color == "orange"):
+        elif(TEAM == "orange"):
             Glow(vex.LightType.ALL_LEDS, 255, 128, 0)
+
+        self.post_completion
