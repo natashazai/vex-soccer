@@ -1,0 +1,21 @@
+from aim_fsm import *
+
+class SoccerStartup(StateMachineProgram):
+    $setup{
+        scan:ScanEnvironment()
+        scan =C=> begin
+        begin: Say("Map Complete")
+    }
+
+class ScanEnvironment(StateMachineProgram):
+    $setup{
+        scan1: Print("45") =N=> Turn(45) =C=> scan2
+        scan2: Turn(45) =C=> scan3
+        scan3: Turn(45) =C=> scan4
+        scan4: Turn(45) =C=> scan5
+        scan5: Turn(45) =C=> scan6
+        scan6: Turn(45) =C=> scan7
+        scan7: Turn(45) =C=> scan8
+        scan8: Turn(45) =C=> done
+        done: Say("Map Complete")
+    }
