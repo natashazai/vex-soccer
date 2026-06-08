@@ -1,68 +1,35 @@
 from aim_fsm import *
 import math
+from goal_detection import *
 
-# Goal: midpoint of the two nearest BARRELS (any color, so orange counts).
-# If fewer than 2 barrels are seen, fall back to a point 20 cm straight ahead.
-GOAL_FORWARD_MM = 200    # fallback goal: 20 cm ahead
-GOAL_LEFT_MM = 0
-LEFT_SIGN = +1           # flip to -1 if it aims the mirror-opposite way
-
-
-def pose_xy(pose):
-    """Pull (x, y) out of a pose, trying a few common access styles."""
-    if pose is None:
-        return None
-    for attr in ("position", "translation", "t"):
-        sub = getattr(pose, attr, None)
-        if sub is not None:
-            if hasattr(sub, "x"):
-                return sub.x, sub.y
-            try:
-                return sub[0], sub[1]
-            except Exception:
-                pass
-    if hasattr(pose, "x") and hasattr(pose, "y"):
-        return pose.x, pose.y
-    try:
-        return pose[0], pose[1]
-    except Exception:
-        return None
+LEFT_SIGN = +1 
 
 
 def ball_rel(ball):
-    """Ball position relative to the robot in mm, as (forward, left)."""
+    """Ball position relative to the robot in mm, as (forward, left).
+    Uses pose_xy imported from goal_detection."""
     xy = pose_xy(getattr(ball, "pose", None))
-    if xy is None:
+    if not xy or xy[0] is None:
         return None
     x, y = xy
     return x, y * LEFT_SIGN
 
 
-def is_barrel(obj):
-    return "Barrel" in type(obj).__name__       # matches OrangeBarrel / BlueBarrel
-
-
-def find_goal_center():
-    """Midpoint of the two NEAREST barrels, as (forward, left) mm. None if <2 seen.
-    This is the goal-detection logic, same idea as the goal_detection module."""
-    posts = []
-    for obj in robot.world_map.objects.values():
-        if is_barrel(obj):
-            xy = pose_xy(getattr(obj, "pose", None))
-            if xy is not None:
-                x, y = xy
-                d = getattr(obj, "sensor_distance", None)
-                posts.append((d if d is not None else 9999, x, y * LEFT_SIGN))
-    if len(posts) < 2:
-        return None
-    posts.sort(key=lambda p: p[0])
-    _, x0, y0 = posts[0]
-    _, x1, y1 = posts[1]
-    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+class UpdateMemory(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        if not getattr(self.parent, "_typedump", False):
+            names = sorted(set(type(o).__name__ for o in robot.world_map.objects.values()))
+            print("[DEBUG] world object types:", names)
+            self.parent._typedump = True
+        self.parent.field_memory.update(robot.world_map)
+        mem = self.parent.field_memory
+        print(f"[SLAM] Posts:{len(mem.goal_posts)} Balls:{len(mem.balls)} "
+              f"Goal:{'YES' if mem.goal_center else 'no'}")
+        self.post_completion()
 
 
 class FindBall(StateNode):
-    """See a ball -> detect the goal (barrels) -> work out the turn that lines them up -> grab."""
     def start(self, event=None):
         super().start(event)
         ball = None
@@ -78,33 +45,31 @@ class FindBall(StateNode):
 
         rel = ball_rel(ball)
         if rel is None:
-            print("[FIND] couldn't read ball pose -> fallback: kick straight")
+            print("[FIND] couldn't read ball pose -> kick straight")
             self.parent.aim_turn = 0
             self.post_data(ball)
             return
-
         bx, by = rel
-        goal = find_goal_center()                    # <-- goal detection from the barrels
+
+        goal = self.parent.field_memory.goal_center
         if goal is None:
-            gx, gy = GOAL_FORWARD_MM, GOAL_LEFT_MM
-            print("[GOAL] no 2 barrels -> hardcoded 20cm-ahead goal")
-        else:
-            gx, gy = goal
-            print(f"[GOAL] barrels -> center fwd={gx:.0f} left={gy:.0f}")
+            print("[FIND] no goal center yet -> kick straight")
+            self.parent.aim_turn = 0
+            self.post_data(ball)
+            return
+        gx, gy = goal
+        gy = gy * LEFT_SIGN 
 
         dir_to_ball   = math.degrees(math.atan2(by, bx))
         dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
         aim = (dir_ball_goal - dir_to_ball + 180) % 360 - 180
         self.parent.aim_turn = aim
-
-        print(f"[FIND] ball fwd={bx:.0f} left={by:.0f} | "
-              f"to_ball={dir_to_ball:.0f} ball->goal={dir_ball_goal:.0f} | "
+        print(f"[FIND] ball fwd={bx:.0f} left={by:.0f} | goal fwd={gx:.0f} left={gy:.0f} | "
               f"turn_after_grab={aim:.0f} deg")
         self.post_data(ball)
 
 
 class GetGrabDist(StateNode):
-    """Drive the full distance INTO the ball so the front magnet grabs it."""
     def start(self, event=None):
         super().start(event)
         d = getattr(self.parent.ball, "sensor_distance", None)
@@ -114,7 +79,6 @@ class GetGrabDist(StateNode):
 
 
 class AimAtGoal(StateNode):
-    """Holding the ball now: turn to face the goal. The kick then releases it there."""
     def start(self, event=None):
         super().start(event)
         turn = getattr(self.parent, "aim_turn", 0)
@@ -125,22 +89,31 @@ class AimAtGoal(StateNode):
 class kick(StateMachineProgram):
     def __init__(self):
         super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
+        self.field_memory = FieldMemory1(stale_timeout=30.0)   # HIS memory class
         self.ball = None
         self.aim_turn = 0
 
     $setup{
-        Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> find
+        Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
+        loop: UpdateMemory()
+        loop =C=> find_goal
+        find_goal: goal_detection()
+        find_goal =S=> find            # goal found -> go for the ball
+        find_goal =F=> scan_goal       # no goal -> turn to look for barrels
+        scan_goal: Turn(45)
+        scan_goal =C=> loop
+
         find: FindBall()
-        find =D=> charge          # ball seen, then go score it
-        find =F=> look_around     # no ball, then scan
-        look_around: Turn(40)
-        look_around =C=> find
+        find =D=> charge
+        find =F=> look_ball
+        look_ball: Turn(40)
+        look_ball =C=> loop
         charge: TurnToward()
         charge =C=> grab
-        grab: GetGrabDist()       # drive into ball, then magnet grabs it
+        grab: GetGrabDist()
         grab =D=> Forward() =C=> aim
         aim: AimAtGoal()
         aim =D=> Turn() =C=> kicker
         kicker: Kick()
-        kicker =C=> find
+        kicker =C=> loop
     }
