@@ -64,9 +64,9 @@ class FieldMemory1:
 
     def _classify(self, obj):
         name = type(obj).__name__
-        if TEAM.lower() == "orange" and "OrangeBarrel" in name:
+        if TEAM.lower() == "orange" and "BlueBarrel" in name:
             return "goalpost"
-        if TEAM.lower() == "blue" and "BlueBarrel" in name:
+        if TEAM.lower() == "blue" and "OrangeBarrel" in name:
             return "goalpost"
         if isinstance(obj, SportsBallObj):
             return "ball"
@@ -170,4 +170,9 @@ class team_lights(StateNode):
     def start(self, event=None):
         super().start(event)
         print(f"[TEAM] {TEAM}")
+        if TEAM.lower() == "orange":
+            Glow(vex.LightType.ALL_LEDS, 250, 20, 0)
+        if TEAM.lower() == "blue":
+            Glow(vex.LightType.ALL_LEDS, 0, 0, 255)
+
         self.post_completion()
