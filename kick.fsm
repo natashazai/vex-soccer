@@ -1,13 +1,12 @@
 from aim_fsm import *
 import math
 from goal_detection import *
+from ball_detection import *
 
-LEFT_SIGN = +1 
+LEFT_SIGN = +1
 
 
 def ball_rel(ball):
-    """Ball position relative to the robot in mm, as (forward, left).
-    Uses pose_xy imported from goal_detection."""
     xy = pose_xy(getattr(ball, "pose", None))
     if not xy or xy[0] is None:
         return None
@@ -29,51 +28,14 @@ class UpdateMemory(StateNode):
         self.post_completion()
 
 
-class FindBall(StateNode):
-    def start(self, event=None):
-        super().start(event)
-        ball = None
-        for obj in robot.world_map.objects.values():
-            if isinstance(obj, SportsBallObj) and getattr(obj, "is_visible", False):
-                ball = obj
-                break
-        if ball is None:
-            print("[FIND] no ball -> look around")
-            self.post_failure()
-            return
-        self.parent.ball = ball
-
-        rel = ball_rel(ball)
-        if rel is None:
-            print("[FIND] couldn't read ball pose -> kick straight")
-            self.parent.aim_turn = 0
-            self.post_data(ball)
-            return
-        bx, by = rel
-
-        goal = self.parent.field_memory.goal_center
-        if goal is None:
-            print("[FIND] no goal center yet -> kick straight")
-            self.parent.aim_turn = 0
-            self.post_data(ball)
-            return
-        gx, gy = goal
-        gy = gy * LEFT_SIGN 
-
-        dir_to_ball   = math.degrees(math.atan2(by, bx))
-        dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
-        aim = (dir_ball_goal - dir_to_ball + 180) % 360 - 180
-        self.parent.aim_turn = aim
-        print(f"[FIND] ball fwd={bx:.0f} left={by:.0f} | goal fwd={gx:.0f} left={gy:.0f} | "
-              f"turn_after_grab={aim:.0f} deg")
-        self.post_data(ball)
-
-
 class GetGrabDist(StateNode):
     def start(self, event=None):
         super().start(event)
-        d = getattr(self.parent.ball, "sensor_distance", None)
-        dist = (d + 20) if d else 100
+        if getattr(self.parent, "ball_control_guess", False):
+            dist = 25
+        else:
+            d = getattr(self.parent.ball, "sensor_distance", None)
+            dist = (d + 20) if d else 100
         print(f"[GRAB] driving {dist:.0f} mm into ball")
         self.post_data(max(dist, 20))
 
@@ -89,31 +51,44 @@ class AimAtGoal(StateNode):
 class kick(StateMachineProgram):
     def __init__(self):
         super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
-        self.field_memory = FieldMemory1(stale_timeout=30.0)   # HIS memory class
+        self.field_memory = FieldMemory1(stale_timeout=30.0)
         self.ball = None
         self.aim_turn = 0
+        self.last_ball_seen = 0
+        self.last_ball_dist = None
+        self.ball_control_guess = False
 
     $setup{
         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
+
         loop: UpdateMemory()
         loop =C=> find_goal
+
         find_goal: goal_detection()
-        find_goal =S=> find            # goal found -> go for the ball
-        find_goal =F=> scan_goal       # no goal -> turn to look for barrels
+        find_goal =S=> find
+        find_goal =F=> scan_goal
+
         scan_goal: Turn(45)
         scan_goal =C=> loop
 
-        find: FindBall()
+        find: ball_detection()
         find =D=> charge
+        find =S=> aim
         find =F=> look_ball
-        look_ball: Turn(40)
+
+        look_ball: Turn(30)
         look_ball =C=> loop
+
         charge: TurnToward()
         charge =C=> grab
+        charge =F=> grab
+
         grab: GetGrabDist()
         grab =D=> Forward() =C=> aim
+
         aim: AimAtGoal()
         aim =D=> Turn() =C=> kicker
+
         kicker: Kick()
-        kicker =C=> loop
+        kicker =C=> Forward(-60) =C=> loop
     }
