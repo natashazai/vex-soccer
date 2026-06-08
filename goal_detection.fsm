@@ -15,7 +15,7 @@ class FieldMemory1:
         self.goal_count = 0
         self.scored_balls = set()
 
-    def update(self, world_map)\:
+    def update(self, world_map):
         now = time.time()
         for obj_id, obj in world_map.objects.items():
             is_vis = getattr(obj, "is_visible", False)
@@ -180,7 +180,7 @@ class CheckGoal(StateNode):
             dist = math.sqrt((bx-gx)**2 + (by-gy)**2)
 
             if dist < mem.goal_width/2:
-                if ball["id"] not in mem.scored_balls"
+                if ball["id"] not in mem.scored_balls:
                     mem.goal_count += 1
                     mem.scored_balls.add(ball["id"])
                     print({mem.goal_count})
@@ -189,7 +189,7 @@ class CheckGoal(StateNode):
 
 class team_lights(StateNode):
     def start(self, event=None):
-        super().start(event):
+        super().start(event)
         if(TEAM == "blue"):
             Glow(vex.LightType.ALL_LEDS, 0, 0, 255)
         elif(TEAM == "orange"):

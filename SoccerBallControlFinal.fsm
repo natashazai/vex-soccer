@@ -1,0 +1,413 @@
+from aim_fsm import *
+from math import atan2, sqrt, pi, cos, sin
+
+# Field size in millimeters.
+FIELD_LENGTH_MM = 1200
+FIELD_WIDTH_MM = 700
+BOUNDARY_MARGIN_MM = 110
+
+# Starting point of the robot relative to the field.
+START_X_MM = 0
+START_Y_MM = 0
+START_THETA_DEG = 0
+
+# Goal coordinates in field coordinates.
+ORANGE_GOAL_X_MM = -FIELD_LENGTH_MM / 2
+ORANGE_GOAL_Y_MM = 0
+BLUE_GOAL_X_MM = FIELD_LENGTH_MM / 2
+BLUE_GOAL_Y_MM = 0
+
+SCAN_TURN_DEG = 30
+SCAN_WAIT_SEC = 0.45
+BALL_CLOSE_MM = 130
+BALL_CONTROL_MM = 165
+CENTER_TOLERANCE_DEG = 10
+MAX_TURN_DEG = 30
+APPROACH_STEP_MM = 90
+RECENTER_STEP_MM = 75
+KICK_BACKUP_MM = -90
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def wrap_deg(angle):
+    while angle <= -180:
+        angle += 360
+    while angle > 180:
+        angle -= 360
+    return angle
+
+
+def find_field(node):
+    p = node
+    while p is not None:
+        if hasattr(p, 'children') and 'field' in p.children:
+            return p.children['field']
+        p = getattr(p, 'parent', None)
+    return None
+
+
+def text_for(name, obj):
+    return (name + ' ' + obj.__class__.__name__).lower()
+
+
+def is_ball(name, obj):
+    text = text_for(name, obj)
+    return 'sportsball' in text or 'sports_ball' in text or 'soccer' in text or 'ball' in text
+
+
+def is_barrel(name, obj):
+    return 'barrel' in text_for(name, obj)
+
+
+def get_xy_from_pose(obj):
+    try:
+        if hasattr(obj, 'pose'):
+            return float(obj.pose.x), float(obj.pose.y)
+    except:
+        pass
+    return None
+
+
+def get_relative_ball_xy(obj):
+    lateral = None
+    forward = None
+
+    for attr in ['x', '_x', 'lateral', 'bearing_x']:
+        try:
+            if hasattr(obj, attr):
+                lateral = float(getattr(obj, attr))
+                break
+        except:
+            pass
+
+    for attr in ['distance', '_distance', 'z', '_z', 'range']:
+        try:
+            if hasattr(obj, attr):
+                forward = float(getattr(obj, attr))
+                break
+        except:
+            pass
+
+    if lateral is not None and forward is not None:
+        return lateral, forward
+    return None
+
+
+class SoccerBallControlFinal(StateMachineProgram):
+
+    def __init__(self):
+        super().__init__(launch_particle_viewer=True,
+                         launch_path_viewer=True,
+                         speech=False)
+
+    class FieldMemory(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            self.origin_x = float(self.robot.pose.x)
+            self.origin_y = float(self.robot.pose.y)
+            self.origin_theta = float(self.robot.pose.theta)
+            self.team_color = None
+            self.attack_color = None
+            self.ball_name = None
+            self.ball_x = None
+            self.ball_y = None
+            self.ball_distance = None
+            self.ball_bearing_deg = None
+            self.last_ball_x = None
+            self.last_ball_y = None
+            self.control_guess = False
+            self.next_turn_deg = 0
+            self.next_forward_mm = 0
+            print('Field start: x=%.0f y=%.0f heading=%.0f' % (START_X_MM, START_Y_MM, START_THETA_DEG))
+            self.post_completion()
+
+        def field_pose(self):
+            x = START_X_MM + float(self.robot.pose.x) - self.origin_x
+            y = START_Y_MM + float(self.robot.pose.y) - self.origin_y
+            t = START_THETA_DEG + (float(self.robot.pose.theta) - self.origin_theta) * 180 / pi
+            return x, y, wrap_deg(t)
+
+        def local_to_field(self, lateral_mm, forward_mm):
+            x, y, t = self.field_pose()
+            a = t * pi / 180
+            bx = x + forward_mm * cos(a) - lateral_mm * sin(a)
+            by = y + forward_mm * sin(a) + lateral_mm * cos(a)
+            return bx, by
+
+        def object_field_xy(self, obj):
+            xy = get_xy_from_pose(obj)
+            if xy is not None:
+                return START_X_MM + xy[0] - self.origin_x, START_Y_MM + xy[1] - self.origin_y
+
+            rel = get_relative_ball_xy(obj)
+            if rel is not None:
+                return self.local_to_field(rel[0], rel[1])
+
+            return None
+
+    class PickTeam(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+            orange = []
+            blue = []
+
+            for name, obj in self.robot.world_map.objects.items():
+                if not getattr(obj, 'is_visible', False) or not is_barrel(name, obj):
+                    continue
+                text = text_for(name, obj)
+                if 'orange' in text:
+                    orange.append(name)
+                if 'blue' in text:
+                    blue.append(name)
+
+            print('Orange barrels:', orange)
+            print('Blue barrels:', blue)
+
+            if len(orange) == 0 and len(blue) == 0:
+                self.post_failure()
+                return
+
+            # Pick team from the visible goal barrel color.
+            if len(orange) >= len(blue):
+                field.team_color = 'orange'
+                field.attack_color = 'blue'
+            else:
+                field.team_color = 'blue'
+                field.attack_color = 'orange'
+
+            print('Team:', field.team_color, 'Shooting at:', field.attack_color)
+            self.post_completion()
+
+    class InBounds(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+            x, y, t = field.field_pose()
+            half_l = FIELD_LENGTH_MM / 2
+            half_w = FIELD_WIDTH_MM / 2
+            ok = (-half_l + BOUNDARY_MARGIN_MM <= x <= half_l - BOUNDARY_MARGIN_MM and
+                  -half_w + BOUNDARY_MARGIN_MM <= y <= half_w - BOUNDARY_MARGIN_MM)
+            print('Pose x=%.0f y=%.0f heading=%.0f in_bounds=%s' % (x, y, t, ok))
+            if ok:
+                self.post_completion()
+            else:
+                self.post_failure()
+
+    class Recenter(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+            x, y, t = field.field_pose()
+            target = atan2(START_Y_MM - y, START_X_MM - x) * 180 / pi
+            field.next_turn_deg = clamp(wrap_deg(target - t), -MAX_TURN_DEG, MAX_TURN_DEG)
+            field.next_forward_mm = RECENTER_STEP_MM
+            print('Recenter turn=%.0f forward=%.0f' % (field.next_turn_deg, field.next_forward_mm))
+            self.post_data('move')
+
+    class CheckBall(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+            rx, ry, rt = field.field_pose()
+            choices = []
+
+            for name, obj in self.robot.world_map.objects.items():
+                if not getattr(obj, 'is_visible', False) or not is_ball(name, obj):
+                    continue
+                xy = field.object_field_xy(obj)
+                if xy is None:
+                    continue
+                bx, by = xy
+                d = sqrt((bx - rx) ** 2 + (by - ry) ** 2)
+                choices.append((d, name, bx, by))
+
+            if len(choices) == 0:
+                if field.ball_distance is not None and field.ball_distance <= BALL_CONTROL_MM:
+                    field.control_guess = True
+                    print('Ball disappeared close to the robot. Treating it as controlled.')
+                    self.post_success()
+                    return
+                field.control_guess = False
+                self.post_failure()
+                return
+
+            choices.sort()
+            d, name, bx, by = choices[0]
+            bearing = wrap_deg(atan2(by - ry, bx - rx) * 180 / pi - rt)
+            field.ball_name = name
+            field.ball_x = bx
+            field.ball_y = by
+            field.ball_distance = d
+            field.ball_bearing_deg = bearing
+            field.last_ball_x = bx
+            field.last_ball_y = by
+            field.control_guess = d <= BALL_CLOSE_MM
+            print('Ball %s x=%.0f y=%.0f dist=%.0f bearing=%.0f' % (name, bx, by, d, bearing))
+            self.post_data(name)
+
+    class ScanForBall(StateNode):
+        # Scan for ball by turning 30 degrees, pausing, then checking again.
+        $setup{
+            Wait(SCAN_WAIT_SEC) =C=> c0
+
+            c0: SoccerBallControlFinal.CheckBall()
+            c0 =D=> ParentCompletes()
+            c0 =S=> ParentCompletes()
+            c0 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c1
+
+            c1: SoccerBallControlFinal.CheckBall()
+            c1 =D=> ParentCompletes()
+            c1 =S=> ParentCompletes()
+            c1 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c2
+
+            c2: SoccerBallControlFinal.CheckBall()
+            c2 =D=> ParentCompletes()
+            c2 =S=> ParentCompletes()
+            c2 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c3
+
+            c3: SoccerBallControlFinal.CheckBall()
+            c3 =D=> ParentCompletes()
+            c3 =S=> ParentCompletes()
+            c3 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c4
+
+            c4: SoccerBallControlFinal.CheckBall()
+            c4 =D=> ParentCompletes()
+            c4 =S=> ParentCompletes()
+            c4 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c5
+
+            c5: SoccerBallControlFinal.CheckBall()
+            c5 =D=> ParentCompletes()
+            c5 =S=> ParentCompletes()
+            c5 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c6
+
+            c6: SoccerBallControlFinal.CheckBall()
+            c6 =D=> ParentCompletes()
+            c6 =S=> ParentCompletes()
+            c6 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c7
+
+            c7: SoccerBallControlFinal.CheckBall()
+            c7 =D=> ParentCompletes()
+            c7 =S=> ParentCompletes()
+            c7 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c8
+
+            c8: SoccerBallControlFinal.CheckBall()
+            c8 =D=> ParentCompletes()
+            c8 =S=> ParentCompletes()
+            c8 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c9
+
+            c9: SoccerBallControlFinal.CheckBall()
+            c9 =D=> ParentCompletes()
+            c9 =S=> ParentCompletes()
+            c9 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c10
+
+            c10: SoccerBallControlFinal.CheckBall()
+            c10 =D=> ParentCompletes()
+            c10 =S=> ParentCompletes()
+            c10 =F=> Turn(SCAN_TURN_DEG) =C=> Wait(SCAN_WAIT_SEC) =C=> c11
+
+            c11: SoccerBallControlFinal.CheckBall()
+            c11 =D=> ParentCompletes()
+            c11 =S=> ParentCompletes()
+            c11 =F=> ParentFails()
+        }
+
+    class ApproachBall(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+
+            if field.control_guess:
+                self.post_success()
+                return
+
+            if field.ball_distance is None or field.ball_bearing_deg is None:
+                self.post_failure()
+                return
+
+            if field.ball_distance <= BALL_CLOSE_MM:
+                field.control_guess = True
+                self.post_success()
+                return
+
+            if abs(field.ball_bearing_deg) > CENTER_TOLERANCE_DEG:
+                field.next_turn_deg = clamp(field.ball_bearing_deg, -MAX_TURN_DEG, MAX_TURN_DEG)
+                print('Turn to ball %.0f' % field.next_turn_deg)
+                self.post_data('turn')
+                return
+
+            field.next_forward_mm = min(APPROACH_STEP_MM, max(35, field.ball_distance - BALL_CLOSE_MM))
+            print('Drive to ball %.0f' % field.next_forward_mm)
+            self.post_data('forward')
+
+    class AimShot(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            field = find_field(self)
+            rx, ry, rt = field.field_pose()
+
+            if field.attack_color == 'orange':
+                gx, gy = ORANGE_GOAL_X_MM, ORANGE_GOAL_Y_MM
+            else:
+                gx, gy = BLUE_GOAL_X_MM, BLUE_GOAL_Y_MM
+
+            bx = field.last_ball_x if field.last_ball_x is not None else rx
+            by = field.last_ball_y if field.last_ball_y is not None else ry
+            desired = atan2(gy - by, gx - bx) * 180 / pi
+            field.next_turn_deg = clamp(wrap_deg(desired - rt), -60, 60)
+            print('Aim from ball x=%.0f y=%.0f to goal x=%.0f y=%.0f turn=%.0f' %
+                  (bx, by, gx, gy, field.next_turn_deg))
+            self.post_data('aim')
+
+    class DynamicTurn(Turn):
+        def start(self, event=None):
+            self.angle_deg = find_field(self).next_turn_deg
+            super().start(event)
+
+    class DynamicForward(Forward):
+        def start(self, event=None):
+            self.distance_mm = find_field(self).next_forward_mm
+            super().start(event)
+
+    class KickReset(StateNode):
+        def start(self, event=None):
+            field = find_field(self)
+            field.control_guess = False
+            field.ball_distance = None
+            field.ball_bearing_deg = None
+            super().start(event)
+
+        $setup{
+            SoftKick() =C=> Forward(KICK_BACKUP_MM) =C=> ParentCompletes()
+        }
+
+    $setup{
+        field: self.FieldMemory() =C=> pick_team
+
+        pick_team: self.PickTeam()
+        pick_team =C=> loop
+        pick_team =F=> self.ScanForBall() =C=> pick_team
+
+        loop: self.InBounds()
+        loop =C=> scan
+        loop =F=> recenter
+
+        recenter: self.Recenter()
+        recenter =D=> self.DynamicTurn() =C=> self.DynamicForward() =C=> loop
+
+        scan: self.ScanForBall()
+        scan =C=> approach
+        scan =F=> loop
+
+        approach: self.ApproachBall()
+        approach =D('turn')=> self.DynamicTurn() =C=> loop
+        approach =D('forward')=> self.DynamicForward() =C=> loop
+        approach =S=> shot
+        approach =F=> loop
+
+        shot: self.AimShot()
+        shot =D=> self.DynamicTurn() =C=> self.KickReset() =C=> loop
+    }
