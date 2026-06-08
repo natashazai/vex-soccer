@@ -1,14 +1,15 @@
 from aim_fsm import *
 import math
 
-#HARDCODED GOAL for now 20cm straight
-GOAL_FORWARD_MM = 200
+# Goal: midpoint of the two nearest BARRELS (any color, so orange counts).
+# If fewer than 2 barrels are seen, fall back to a point 20 cm straight ahead.
+GOAL_FORWARD_MM = 200    # fallback goal: 20 cm ahead
 GOAL_LEFT_MM = 0
-LEFT_SIGN = +1
+LEFT_SIGN = +1           # flip to -1 if it aims the mirror-opposite way
 
 
 def pose_xy(pose):
-    """Pull (x, y) out of the ball's pose, trying a few common access styles."""
+    """Pull (x, y) out of a pose, trying a few common access styles."""
     if pose is None:
         return None
     for attr in ("position", "translation", "t"):
@@ -29,17 +30,39 @@ def pose_xy(pose):
 
 
 def ball_rel(ball):
-    """Ball position relative to the robot in mm, as (forward, left).
-    Read from ball.pose. Valid as robot-relative while the robot is at its
-    starting spot (the world origin)."""
+    """Ball position relative to the robot in mm, as (forward, left)."""
     xy = pose_xy(getattr(ball, "pose", None))
     if xy is None:
         return None
     x, y = xy
     return x, y * LEFT_SIGN
 
+
+def is_barrel(obj):
+    return "Barrel" in type(obj).__name__       # matches OrangeBarrel / BlueBarrel
+
+
+def find_goal_center():
+    """Midpoint of the two NEAREST barrels, as (forward, left) mm. None if <2 seen.
+    This is the goal-detection logic, same idea as the goal_detection module."""
+    posts = []
+    for obj in robot.world_map.objects.values():
+        if is_barrel(obj):
+            xy = pose_xy(getattr(obj, "pose", None))
+            if xy is not None:
+                x, y = xy
+                d = getattr(obj, "sensor_distance", None)
+                posts.append((d if d is not None else 9999, x, y * LEFT_SIGN))
+    if len(posts) < 2:
+        return None
+    posts.sort(key=lambda p: p[0])
+    _, x0, y0 = posts[0]
+    _, x1, y1 = posts[1]
+    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+
 class FindBall(StateNode):
-    """See a ball, then work out the turn that lines it up with the goal, then go grab it."""
+    """See a ball -> detect the goal (barrels) -> work out the turn that lines them up -> grab."""
     def start(self, event=None):
         super().start(event)
         ball = None
@@ -52,25 +75,30 @@ class FindBall(StateNode):
             self.post_failure()
             return
         self.parent.ball = ball
-        if not getattr(self.parent, "_dumped", False):
-            p = getattr(ball, "pose", None)
-            print("[DEBUG] pose repr:", repr(p))
-            print("[DEBUG] pose attrs:", [a for a in dir(p) if not a.startswith("_")])
-            self.parent._dumped = True
+
         rel = ball_rel(ball)
         if rel is None:
-            print("[FIND] couldn't read ball pose, then fallback: kick straight")
+            print("[FIND] couldn't read ball pose -> fallback: kick straight")
             self.parent.aim_turn = 0
             self.post_data(ball)
             return
+
         bx, by = rel
-        gx, gy = GOAL_FORWARD_MM, GOAL_LEFT_MM
+        goal = find_goal_center()                    # <-- goal detection from the barrels
+        if goal is None:
+            gx, gy = GOAL_FORWARD_MM, GOAL_LEFT_MM
+            print("[GOAL] no 2 barrels -> hardcoded 20cm-ahead goal")
+        else:
+            gx, gy = goal
+            print(f"[GOAL] barrels -> center fwd={gx:.0f} left={gy:.0f}")
+
         dir_to_ball   = math.degrees(math.atan2(by, bx))
         dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
         aim = (dir_ball_goal - dir_to_ball + 180) % 360 - 180
         self.parent.aim_turn = aim
+
         print(f"[FIND] ball fwd={bx:.0f} left={by:.0f} | "
-              f"to_ball={dir_to_ball:.0f} ball to goal={dir_ball_goal:.0f} | "
+              f"to_ball={dir_to_ball:.0f} ball->goal={dir_ball_goal:.0f} | "
               f"turn_after_grab={aim:.0f} deg")
         self.post_data(ball)
 
@@ -99,16 +127,17 @@ class kick(StateMachineProgram):
         super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
         self.ball = None
         self.aim_turn = 0
+
     $setup{
         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> find
         find: FindBall()
-        find =D=> charge #ball seen, then go score it
-        find =F=> look_around #no ball, then scan
+        find =D=> charge          # ball seen, then go score it
+        find =F=> look_around     # no ball, then scan
         look_around: Turn(40)
         look_around =C=> find
-        charge: TurnToward() #face the ball
+        charge: TurnToward()
         charge =C=> grab
-        grab: GetGrabDist() #drive into ball, then magnet grabs it
+        grab: GetGrabDist()       # drive into ball, then magnet grabs it
         grab =D=> Forward() =C=> aim
         aim: AimAtGoal()
         aim =D=> Turn() =C=> kicker
