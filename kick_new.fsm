@@ -1,0 +1,242 @@
+from aim_fsm import *
+import math
+import time
+from goal_detection import *   # FieldMemory1, goal_detection node, pose_xy
+
+LEFT_SIGN = +1
+SCAN_TURN_DEG = 30
+SCAN_WAIT_SEC = 1.5      # stop this long after each turn so the camera can detect
+BALL_CONTROL_MM = 160
+AIM_LIMIT_DEG = 70
+TURN_SIGN = +1               # flip to -1 if FaceGoal turns the wrong way
+
+
+def wrap_deg(a):
+    while a <= -180:
+        a += 360
+    while a > 180:
+        a -= 360
+    return a
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def xy_from_pose(pose):
+    try:
+        xy = pose_xy(pose)
+        if xy and xy[0] is not None:
+            return float(xy[0]), float(xy[1])
+    except:
+        pass
+    try:
+        return float(pose.x), float(pose.y)
+    except:
+        pass
+    return None
+
+
+def ball_rel(ball):
+    xy = xy_from_pose(getattr(ball, 'pose', None))
+    if xy:
+        return xy[0], xy[1] * LEFT_SIGN
+    d = getattr(ball, 'sensor_distance', None)
+    if d is not None:
+        return float(d), 0.0
+    return None
+
+
+def is_ball(obj):
+    SportsBall = globals().get('SportsBallObj', None)
+    if SportsBall is not None and isinstance(obj, SportsBall):
+        return True
+    text = type(obj).__name__.lower()
+    return 'sportsball' in text or 'sports_ball' in text or 'soccer' in text or 'ball' in text
+
+
+def best_visible_ball(wm):
+    choices = []
+    for obj in wm.objects.values():
+        if not getattr(obj, 'is_visible', False) or not is_ball(obj):
+            continue
+        rel = ball_rel(obj)
+        if rel is None:
+            d = getattr(obj, 'sensor_distance', None)
+            d = float(d) if d is not None else 9999.0
+            choices.append((d, obj, None))
+        else:
+            fwd, left = rel
+            choices.append((math.sqrt(fwd * fwd + left * left), obj, rel))
+    choices.sort(key=lambda x: x[0])
+    return choices[0] if choices else None
+
+
+def aim_from_ball_to_goal(parent, rel):
+    if rel is None:
+        return 0.0
+    goal = getattr(parent.field_memory, 'goal_center', None)
+    if goal is None:
+        return 0.0
+    bx, by = rel
+    gx, gy = goal
+    gy = gy * LEFT_SIGN
+    dir_to_ball = math.degrees(math.atan2(by, bx))
+    dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
+    return clamp(wrap_deg(dir_ball_goal - dir_to_ball), -AIM_LIMIT_DEG, AIM_LIMIT_DEG)
+
+
+def robot_xy():
+    p = getattr(robot, "pose", None)
+    return (float(getattr(p, "x", 0.0) or 0.0), float(getattr(p, "y", 0.0) or 0.0))
+
+
+def robot_heading_deg():
+    p = getattr(robot, "pose", None)
+    th = float(getattr(p, "theta", 0.0) or 0.0)
+    return th if abs(th) > 6.5 else math.degrees(th)
+
+
+class ball_detection(StateNode):
+    class Check(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            time.sleep(SCAN_WAIT_SEC)
+            detector = self.parent
+            result = best_visible_ball(self.robot.world_map)
+            if result is None:
+                last_d = getattr(detector.parent, 'last_ball_dist', None)
+                last_seen = getattr(detector.parent, 'last_ball_seen', 0)
+                if last_d is not None and last_d <= BALL_CONTROL_MM and time.time() - last_seen < 3.0:
+                    print('[BALL] lost close ball; treating it as controlled')
+                    detector.parent.ball_control_guess = True
+                    detector.post_success()
+                    return
+                print('[BALL] no ball on this check')
+                self.post_failure()
+                return
+            dist, ball, rel = result
+            detector.parent.ball = ball
+            detector.parent.ball_control_guess = dist <= BALL_CONTROL_MM
+            detector.parent.last_ball_seen = time.time()
+            detector.parent.last_ball_dist = dist
+            detector.parent.aim_turn = aim_from_ball_to_goal(detector.parent, rel)
+            if rel is None:
+                print('[BALL] visible, no pose; using straight aim')
+            else:
+                print('[BALL] visible fwd=%.0f left=%.0f dist=%.0f aim=%.0f' %
+                      (rel[0], rel[1], dist, detector.parent.aim_turn))
+            detector.post_data(ball)
+
+    $setup{
+        c0: self.Check()
+        c0 =F=> Turn(SCAN_TURN_DEG) =C=> c1
+        c1: self.Check()
+        c1 =F=> Turn(SCAN_TURN_DEG) =C=> c2
+        c2: self.Check()
+        c2 =F=> Turn(SCAN_TURN_DEG) =C=> c3
+        c3: self.Check()
+        c3 =F=> Turn(SCAN_TURN_DEG) =C=> c4
+        c4: self.Check()
+        c4 =F=> Turn(SCAN_TURN_DEG) =C=> c5
+        c5: self.Check()
+        c5 =F=> Turn(SCAN_TURN_DEG) =C=> c6
+        c6: self.Check()
+        c6 =F=> Turn(SCAN_TURN_DEG) =C=> c7
+        c7: self.Check()
+        c7 =F=> Turn(SCAN_TURN_DEG) =C=> c8
+        c8: self.Check()
+        c8 =F=> Turn(SCAN_TURN_DEG) =C=> c9
+        c9: self.Check()
+        c9 =F=> Turn(SCAN_TURN_DEG) =C=> c10
+        c10: self.Check()
+        c10 =F=> Turn(SCAN_TURN_DEG) =C=> c11
+        c11: self.Check()
+        c11 =F=> ParentFails()
+    }
+
+
+class UpdateMemory(StateNode):
+    """Refresh field memory (for goal detection)."""
+    def start(self, event=None):
+        super().start(event)
+        self.parent.field_memory.update(robot.world_map)
+        mem = self.parent.field_memory
+        print(f"[SLAM] Posts:{len(mem.goal_posts)} Balls:{len(mem.balls)} "
+              f"Goal:{'YES' if mem.goal_center else 'no'}")
+        self.post_completion()
+
+
+class GetGrabDist(StateNode):
+    """Drive the full distance INTO the ball so the front magnet grabs it."""
+    def start(self, event=None):
+        super().start(event)
+        d = getattr(self.parent.ball, "sensor_distance", None)
+        dist = (d + 20) if d else 100
+        print(f"[GRAB] driving {dist:.0f} mm into ball")
+        self.post_data(max(dist, 20))
+
+
+class FaceGoal(StateNode):
+    """Holding the ball: turn so the robot faces the goal center, then kick."""
+    def start(self, event=None):
+        super().start(event)
+        goal = self.parent.field_memory.goal_center
+        if goal is None:
+            print("[AIM] no goal_center -> kick straight")
+            self.post_data(0)
+            return
+        gx, gy = goal
+        rx, ry = robot_xy()
+        rh = robot_heading_deg()
+        dir_to_goal = math.degrees(math.atan2(gy - ry, gx - rx))
+        turn = (dir_to_goal - rh + 180) % 360 - 180
+        turn *= TURN_SIGN
+        print(f"[AIM] robot=({rx:.0f},{ry:.0f},{rh:.0f}deg) goal=({gx:.0f},{gy:.0f}) "
+              f"-> turn {turn:.0f} deg")
+        self.post_data(turn)
+
+
+class kick(StateMachineProgram):
+    def __init__(self):
+        super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
+        self.field_memory = FieldMemory1(stale_timeout=30.0)
+        self.ball = None
+        self.aim_turn = 0
+        self.ball_control_guess = False
+        self.last_ball_seen = 0
+        self.last_ball_dist = None
+
+    $setup{
+        Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> scan_ball
+
+        # ---- 1) scan for the ball (YOUR ball_detection sub-FSM) ----
+        scan_ball: ball_detection()
+        scan_ball =D=> charge          # ball seen -> turn to it and grab
+        scan_ball =S=> search          # ball assumed controlled -> go find goal
+        scan_ball =F=> scan_ball       # nothing after a full sweep -> sweep again
+
+        # ---- 2) grab it ----
+        charge: TurnToward()
+        charge =C=> grab
+        grab: GetGrabDist()
+        grab =D=> Forward() =C=> search
+
+        # ---- 3) find goal, face it, kick ----
+        search: UpdateMemory()
+        search =C=> check_goal
+        check_goal: goal_detection()
+        check_goal =S=> face
+        check_goal =F=> search_turn
+        search_turn: Turn(30)
+        search_turn =C=> search_pause
+        search_pause: StateNode()
+        search_pause =T(1.5)=> search       # stop 1.5s so the camera can see the barrels
+
+        face: FaceGoal()
+        face =D=> Turn() =C=> kicker
+        face =C=> kicker
+        kicker: Kick()
+        kicker =C=> done               # one attempt, then stop (change to 'scan_ball' to loop)
+        done: StateNode()
+    }
