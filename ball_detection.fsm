@@ -84,12 +84,13 @@ def aim_from_ball_to_goal(parent, rel):
     dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
     return clamp(wrap_deg(dir_ball_goal - dir_to_ball), -AIM_LIMIT_DEG, AIM_LIMIT_DEG)
 
-
 class ball_detection(StateNode):
 
     class Check(StateNode):
         def start(self, event=None):
             super().start(event)
+            
+            self.robot.world_map.update()
             time.sleep(SCAN_WAIT_SEC)
             detector = self.parent
             result = best_visible_ball(self.robot.world_map)
@@ -112,6 +113,20 @@ class ball_detection(StateNode):
             detector.parent.last_ball_seen = time.time()
             detector.parent.last_ball_dist = dist
             detector.parent.aim_turn = aim_from_ball_to_goal(detector.parent, rel)
+
+#This part is the centering on the ball part
+            if rel is not None:
+                fwd, left = rel
+
+                if abs(left) < 40:
+                    print("[BALL] centered enough, going to grab")
+                    detector.post_completion()
+                    return
+
+                if abs(detector.parent.aim_turn) < 12:
+                    print("[BALL] aim small enough, going to grab")
+                    detector.post_success()
+                    return
 
             if rel is None:
                 print('[BALL] visible, no pose; using straight aim')

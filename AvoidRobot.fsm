@@ -4,10 +4,12 @@ class CheckForRobot(StateNode):
     def start(self, event=None):
         super().start(event)
 
+        mem = self.parent.field_memory
+
         closest = None
         min_dist = float('inf')
 
-        for obj in self.world_map.objects.values():
+        for obj in mem.objects.values():
             if isinstance(obj, RobotObj) and obj.is_visible:
                 dx = obj.pose.x - self.robot.pose.x
                 dy = obj.pose.y - self.robot.pose.y
@@ -36,15 +38,3 @@ class ReplanPath(StateNode):
         print("Path plans should route around it.")
 
         self.post_completion()
-
-class AvoidRobot(StateMachineProgram):
-    $setup{
-        detect: CheckForRobot()
-        detect =S=> replan
-        detect =F=> done
-
-        replan: ReplanPath()
-        replan =C=> done
-
-        done: Say("Path update")
-    }

@@ -1,189 +1,233 @@
 from aim_fsm import *
 import math
+from goal_detection import *
+from ball_detection import *
+from AvoidRobot import *
 
-# Goal: midpoint of the two nearest BARRELS (any color, so orange counts).
-# If fewer than 2 barrels are seen, fall back to a point 20 cm straight ahead.
-GOAL_FORWARD_MM = 200    # fallback goal: 20 cm ahead
-GOAL_LEFT_MM = 0
-LEFT_SIGN = +1           # flip to -1 if it aims the mirror-opposite way
-
-
-def pose_xy(pose):
-    """Pull (x, y) out of a pose, trying a few common access styles."""
-    if pose is None:
-        return None
-    for attr in ("position", "translation", "t"):
-        sub = getattr(pose, attr, None)
-        if sub is not None:
-            if hasattr(sub, "x"):
-                return sub.x, sub.y
-            try:
-                return sub[0], sub[1]
-            except Exception:
-                pass
-    if hasattr(pose, "x") and hasattr(pose, "y"):
-        return pose.x, pose.y
-    try:
-        return pose[0], pose[1]
-    except Exception:
-        return None
+LEFT_SIGN = +1
 
 
 def ball_rel(ball):
-    """Ball position relative to the robot in mm, as (forward, left)."""
     xy = pose_xy(getattr(ball, "pose", None))
-    if xy is None:
+    if not xy or xy[0] is None:
         return None
     x, y = xy
     return x, y * LEFT_SIGN
 
 
-def is_barrel(obj):
-    return "Barrel" in type(obj).__name__       # matches OrangeBarrel / BlueBarrel
-
-
-def find_goal_center():
-    """Midpoint of the two NEAREST barrels, as (forward, left) mm. None if <2 seen.
-    This is the goal-detection logic, same idea as the goal_detection module."""
-    posts = []
-    for obj in robot.world_map.objects.values():
-        if is_barrel(obj):
-            xy = pose_xy(getattr(obj, "pose", None))
-            if xy is not None:
-                x, y = xy
-                d = getattr(obj, "sensor_distance", None)
-                posts.append((d if d is not None else 9999, x, y * LEFT_SIGN))
-    if len(posts) < 2:
-        return None
-    posts.sort(key=lambda p: p[0])
-    _, x0, y0 = posts[0]
-    _, x1, y1 = posts[1]
-    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
-
-
-class FindBall(StateNode):
-    """See a ball -> detect the goal (barrels) -> work out the turn that lines them up -> grab."""
+class UpdateMemory(StateNode):
     def start(self, event=None):
         super().start(event)
-        ball = None
-        for obj in robot.world_map.objects.values():
-            if isinstance(obj, SportsBallObj) and getattr(obj, "is_visible", False):
-                ball = obj
-                break
-        if ball is None:
-            print("[FIND] no ball -> look around")
-            self.post_failure()
-            return
-        self.parent.ball = ball
-
-        rel = ball_rel(ball)
-        if rel is None:
-            print("[FIND] couldn't read ball pose -> fallback: kick straight")
-            self.parent.aim_turn = 0
-            self.post_data(ball)
-            return
-
-        bx, by = rel
-        goal = find_goal_center()                    # <-- goal detection from the barrels
-        if goal is None:
-            gx, gy = GOAL_FORWARD_MM, GOAL_LEFT_MM
-            print("[GOAL] no 2 barrels -> hardcoded 20cm-ahead goal")
-        else:
-            gx, gy = goal
-            print(f"[GOAL] barrels -> center fwd={gx:.0f} left={gy:.0f}")
-
-        dir_to_ball   = math.degrees(math.atan2(by, bx))
-        dir_ball_goal = math.degrees(math.atan2(gy - by, gx - bx))
-        aim = (dir_ball_goal - dir_to_ball + 180) % 360 - 180
-        self.parent.aim_turn = aim
-
-        print(f"[FIND] ball fwd={bx:.0f} left={by:.0f} | "
-              f"to_ball={dir_to_ball:.0f} ball->goal={dir_ball_goal:.0f} | "
-              f"turn_after_grab={aim:.0f} deg")
-        self.post_data(ball)
+        if not getattr(self.parent, "_typedump", False):
+            names = sorted(set(type(o).__name__ for o in robot.world_map.objects.values()))
+            print("[DEBUG] world object types:", names)
+            self.parent._typedump = True
+        self.parent.field_memory.update(robot.world_map)
+        mem = self.parent.field_memory
+        print(f"[SLAM] Posts:{len(mem.goal_posts)} Balls:{len(mem.balls)} "
+              f"Goal:{'YES' if mem.goal_center else 'no'}")
+        self.post_completion()
 
 
 class GetGrabDist(StateNode):
-    """Drive the full distance INTO the ball so the front magnet grabs it."""
     def start(self, event=None):
         super().start(event)
-        d = getattr(self.parent.ball, "sensor_distance", None)
-        dist = (d + 20) if d else 100
+        if getattr(self.parent, "ball_control_guess", False):
+            dist = 25
+        else:
+            d = getattr(self.parent.ball, "sensor_distance", None)
+            dist = (d + 20) if d else 100
         print(f"[GRAB] driving {dist:.0f} mm into ball")
         self.post_data(max(dist, 20))
 
 
 class AimAtGoal(StateNode):
-    """Holding the ball now: turn to face the goal. The kick then releases it there."""
     def start(self, event=None):
         super().start(event)
         turn = getattr(self.parent, "aim_turn", 0)
         print(f"[AIM] turning {turn:.0f} deg toward goal, then kicking")
         self.post_data(turn)
 
+class ResetBallControl(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        self.parent.ball_control_guess = False
+        self.post_completion()
+
+class StoreBall(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        # event.data contains the ball object from ball_detection
+        self.parent.ball = event.data
+        self.post_completion()
+
+class ResetBallControl(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        self.parent.ball_control_guess = False
+        self.post_completion()
 
 class kick(StateMachineProgram):
     def __init__(self):
         super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
+        self.field_memory = FieldMemory1(stale_timeout=30.0)
         self.ball = None
         self.aim_turn = 0
+        self.last_ball_seen = 0
+        self.last_ball_dist = None
+        self.ball_control_guess = False
 
     def setup(self):
-        #         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> find
-        #         find: FindBall()
-        #         find =D=> charge          # ball seen, then go score it
-        #         find =F=> look_around     # no ball, then scan
-        #         look_around: Turn(40)
-        #         look_around =C=> find
+        #         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
+        # 
+        #         loop: UpdateMemory()
+        #         loop =C=> find_ball
+        #         
+        #         find_ball: ball_detection()
+        #         reset_ball_control: ResetBallControl()
+        #         store_ball: StoreBall()
+        #         
+        #         find_ball =D=> store_ball
+        #         store_ball =C=> reset_ball_control
+        #         reset_ball_control =C=> charge
+        #         find_ball =F=> look_ball
+        #         find_ball =S=> grab
+        # 
+        #         look_ball: Turn(30)
+        #         look_ball =T(2.0)=> loop
+        # 
         #         charge: TurnToward()
-        #         charge =C=> grab
-        #         grab: GetGrabDist()       # drive into ball, then magnet grabs it
-        #         grab =D=> Forward() =C=> aim
+        #         charge =C=> ball_pinpoint
+        #         charge =F=> ball_pinpoint
+        #         
+        #         ball_pinpoint: ball_detection()
+        #         ball_pinpoint =D=> charge
+        #         ball_pinpoint =S=> grab
+        #         ball_pinpoint =F=>look_ball
+        #         
+        #         grab: GetGrabDist()
+        #         grab =D=> Forward() =C=> detect_robot
+        # 
+        #         detect_robot: CheckForRobot()
+        #         detect_robot =S=> replan
+        #         detect_robot =F=> have_ball
+        #         replan: ReplanPath()
+        #         replan =C=> have_ball
+        # 
+        #         have_ball: UpdateMemory()
+        #         have_ball =C=> find_goal
+        # 
+        #         find_goal: goal_detection()
+        #         find_goal =S=> aim
+        #         find_goal =F=> scan_goal
+        # 
+        #         scan_goal: Turn(45)
+        #         scan_goal =T(2.0)=> have_ball
+        # 
         #         aim: AimAtGoal()
         #         aim =D=> Turn() =C=> kicker
+        # 
         #         kicker: Kick()
-        #         kicker =C=> find
+        #         kicker =C=> Forward(-60) =C=> loop
         
-        # Code generated by genfsm on Mon Jun  8 11:17:13 2026:
+        # Code generated by genfsm on Tue Jun  9 00:52:20 2026:
         
         glow1 = Glow(vex.LightType.ALL_LEDS, 0, 0, 255) .set_name("glow1") .set_parent(self)
-        find = FindBall() .set_name("find") .set_parent(self)
-        look_around = Turn(40) .set_name("look_around") .set_parent(self)
+        loop = UpdateMemory() .set_name("loop") .set_parent(self)
+        find_ball = ball_detection() .set_name("find_ball") .set_parent(self)
+        reset_ball_control = ResetBallControl() .set_name("reset_ball_control") .set_parent(self)
+        store_ball = StoreBall() .set_name("store_ball") .set_parent(self)
+        look_ball = Turn(30) .set_name("look_ball") .set_parent(self)
         charge = TurnToward() .set_name("charge") .set_parent(self)
+        ball_pinpoint = ball_detection() .set_name("ball_pinpoint") .set_parent(self)
         grab = GetGrabDist() .set_name("grab") .set_parent(self)
         forward1 = Forward() .set_name("forward1") .set_parent(self)
+        detect_robot = CheckForRobot() .set_name("detect_robot") .set_parent(self)
+        replan = ReplanPath() .set_name("replan") .set_parent(self)
+        have_ball = UpdateMemory() .set_name("have_ball") .set_parent(self)
+        find_goal = goal_detection() .set_name("find_goal") .set_parent(self)
+        scan_goal = Turn(45) .set_name("scan_goal") .set_parent(self)
         aim = AimAtGoal() .set_name("aim") .set_parent(self)
         turn1 = Turn() .set_name("turn1") .set_parent(self)
         kicker = Kick() .set_name("kicker") .set_parent(self)
+        forward2 = Forward(-60) .set_name("forward2") .set_parent(self)
         
         completiontrans1 = CompletionTrans() .set_name("completiontrans1")
-        completiontrans1 .add_sources(glow1) .add_destinations(find)
-        
-        datatrans1 = DataTrans() .set_name("datatrans1")
-        datatrans1 .add_sources(find) .add_destinations(charge)
-        
-        failuretrans1 = FailureTrans() .set_name("failuretrans1")
-        failuretrans1 .add_sources(find) .add_destinations(look_around)
+        completiontrans1 .add_sources(glow1) .add_destinations(loop)
         
         completiontrans2 = CompletionTrans() .set_name("completiontrans2")
-        completiontrans2 .add_sources(look_around) .add_destinations(find)
+        completiontrans2 .add_sources(loop) .add_destinations(find_ball)
+        
+        datatrans1 = DataTrans() .set_name("datatrans1")
+        datatrans1 .add_sources(find_ball) .add_destinations(store_ball)
         
         completiontrans3 = CompletionTrans() .set_name("completiontrans3")
-        completiontrans3 .add_sources(charge) .add_destinations(grab)
-        
-        datatrans2 = DataTrans() .set_name("datatrans2")
-        datatrans2 .add_sources(grab) .add_destinations(forward1)
+        completiontrans3 .add_sources(store_ball) .add_destinations(reset_ball_control)
         
         completiontrans4 = CompletionTrans() .set_name("completiontrans4")
-        completiontrans4 .add_sources(forward1) .add_destinations(aim)
+        completiontrans4 .add_sources(reset_ball_control) .add_destinations(charge)
         
-        datatrans3 = DataTrans() .set_name("datatrans3")
-        datatrans3 .add_sources(aim) .add_destinations(turn1)
+        failuretrans1 = FailureTrans() .set_name("failuretrans1")
+        failuretrans1 .add_sources(find_ball) .add_destinations(look_ball)
+        
+        successtrans1 = SuccessTrans() .set_name("successtrans1")
+        successtrans1 .add_sources(find_ball) .add_destinations(grab)
+        
+        timertrans1 = TimerTrans(2.0) .set_name("timertrans1")
+        timertrans1 .add_sources(look_ball) .add_destinations(loop)
         
         completiontrans5 = CompletionTrans() .set_name("completiontrans5")
-        completiontrans5 .add_sources(turn1) .add_destinations(kicker)
+        completiontrans5 .add_sources(charge) .add_destinations(ball_pinpoint)
+        
+        failuretrans2 = FailureTrans() .set_name("failuretrans2")
+        failuretrans2 .add_sources(charge) .add_destinations(ball_pinpoint)
+        
+        datatrans2 = DataTrans() .set_name("datatrans2")
+        datatrans2 .add_sources(ball_pinpoint) .add_destinations(charge)
+        
+        successtrans2 = SuccessTrans() .set_name("successtrans2")
+        successtrans2 .add_sources(ball_pinpoint) .add_destinations(grab)
+        
+        failuretrans3 = FailureTrans() .set_name("failuretrans3")
+        failuretrans3 .add_sources(ball_pinpoint) .add_destinations(look_ball)
+        
+        datatrans3 = DataTrans() .set_name("datatrans3")
+        datatrans3 .add_sources(grab) .add_destinations(forward1)
         
         completiontrans6 = CompletionTrans() .set_name("completiontrans6")
-        completiontrans6 .add_sources(kicker) .add_destinations(find)
+        completiontrans6 .add_sources(forward1) .add_destinations(detect_robot)
+        
+        successtrans3 = SuccessTrans() .set_name("successtrans3")
+        successtrans3 .add_sources(detect_robot) .add_destinations(replan)
+        
+        failuretrans4 = FailureTrans() .set_name("failuretrans4")
+        failuretrans4 .add_sources(detect_robot) .add_destinations(have_ball)
+        
+        completiontrans7 = CompletionTrans() .set_name("completiontrans7")
+        completiontrans7 .add_sources(replan) .add_destinations(have_ball)
+        
+        completiontrans8 = CompletionTrans() .set_name("completiontrans8")
+        completiontrans8 .add_sources(have_ball) .add_destinations(find_goal)
+        
+        successtrans4 = SuccessTrans() .set_name("successtrans4")
+        successtrans4 .add_sources(find_goal) .add_destinations(aim)
+        
+        failuretrans5 = FailureTrans() .set_name("failuretrans5")
+        failuretrans5 .add_sources(find_goal) .add_destinations(scan_goal)
+        
+        timertrans2 = TimerTrans(2.0) .set_name("timertrans2")
+        timertrans2 .add_sources(scan_goal) .add_destinations(have_ball)
+        
+        datatrans4 = DataTrans() .set_name("datatrans4")
+        datatrans4 .add_sources(aim) .add_destinations(turn1)
+        
+        completiontrans9 = CompletionTrans() .set_name("completiontrans9")
+        completiontrans9 .add_sources(turn1) .add_destinations(kicker)
+        
+        completiontrans10 = CompletionTrans() .set_name("completiontrans10")
+        completiontrans10 .add_sources(kicker) .add_destinations(forward2)
+        
+        completiontrans11 = CompletionTrans() .set_name("completiontrans11")
+        completiontrans11 .add_sources(forward2) .add_destinations(loop)
         
         return self

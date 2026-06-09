@@ -5,7 +5,6 @@ import json
 
 TEAM = "orange"
 
-
 def pose_xy(pose):
     """Pull (x, y) out of a world object's pose. (None, None) if unreadable."""
     if pose is None:
@@ -64,9 +63,9 @@ class FieldMemory1:
 
     def _classify(self, obj):
         name = type(obj).__name__
-        if TEAM.lower() == "orange" and "BlueBarrel" in name:
+        if TEAM.lower() == "orange" and "BlueBarrelObj" in name:
             return "goalpost"
-        if TEAM.lower() == "blue" and "OrangeBarrel" in name:
+        if TEAM.lower() == "blue" and "OrangeBarrelObj" in name:
             return "goalpost"
         if isinstance(obj, SportsBallObj):
             return "ball"
@@ -75,15 +74,23 @@ class FieldMemory1:
         return "other"
 
     def _rebuild(self):
-        self.goal_posts = [v for v in self.objects.values() if v["type"] == "goalpost"]
-        self.balls = [v for v in self.objects.values() if v["type"] == "ball"]
-        if len(self.goal_posts) >= 2:
-            posts = sorted(self.goal_posts, key=lambda p: p["distance"] or 9999)[:2]
-            x0, y0 = posts[0].get("x"), posts[0].get("y")
-            x1, y1 = posts[1].get("x"), posts[1].get("y")
-            if None not in (x0, y0, x1, y1):
-                self.goal_center = ((x0 + x1) / 2, (y0 + y1) / 2)
-                self.goal_width = math.sqrt((x0 - x1) ** 2 + (y0 - y1) ** 2)
+        posts = [v for v in self.objects.values()
+                if v["type"] == "goalpost" and v["x"] is not None and v["y"] is not None]
+
+        front_posts = [p for p in posts if p["x"] > 0]
+        use_posts = front_posts if len(front_posts) >= 2 else posts
+
+        self.goal_posts = use_posts
+
+        if len(use_posts) >= 2:
+            posts2 = sorted(use_posts, key=lambda p: p["distance"] or 9999)[:2]
+            x0, y0 = posts2[0]["x"], posts2[0]["y"]
+            x1, y1 = posts2[1]["x"], posts2[1]["y"]
+            self.goal_center = ((x0 + x1) / 2, (y0 + y1) / 2)
+            self.goal_width = math.sqrt((x0 - x1) ** 2 + (y0 - y1) ** 2)
+        else:
+            self.goal_center = None
+            self.goal_width = None
 
     def snapshot_for_ai(self, robot_x=0, robot_y=0, robot_heading=0):
         def r(v):

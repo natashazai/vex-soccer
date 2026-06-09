@@ -2,6 +2,7 @@ from aim_fsm import *
 import math
 from goal_detection import *
 from ball_detection import *
+from AvoidRobot import *
 
 LEFT_SIGN = +1
 
@@ -47,6 +48,24 @@ class AimAtGoal(StateNode):
         print(f"[AIM] turning {turn:.0f} deg toward goal, then kicking")
         self.post_data(turn)
 
+class ResetBallControl(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        self.parent.ball_control_guess = False
+        self.post_completion()
+
+class StoreBall(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        # event.data contains the ball object from ball_detection
+        self.parent.ball = event.data
+        self.post_completion()
+
+class ResetBallControl(StateNode):
+    def start(self, event=None):
+        super().start(event)
+        self.parent.ball_control_guess = False
+        self.post_completion()
 
 class kick(StateMachineProgram):
     def __init__(self):
@@ -62,29 +81,49 @@ class kick(StateMachineProgram):
         Glow(vex.LightType.ALL_LEDS, 0, 0, 255) =C=> loop
 
         loop: UpdateMemory()
-        loop =C=> find_goal
+        loop =C=> find_ball
+        
+        find_ball: ball_detection()
+        reset_ball_control: ResetBallControl()
+        store_ball: StoreBall()
+        
+        find_ball =D=> store_ball
+        store_ball =C=> reset_ball_control
+        reset_ball_control =C=> charge
+        find_ball =F=> look_ball
+        find_ball =S=> grab
+
+        look_ball: Turn(30)
+        look_ball =T(2.0)=> loop
+
+        charge: TurnToward()
+        charge =C=> ball_pinpoint
+        charge =F=> ball_pinpoint
+        
+        ball_pinpoint: ball_detection()
+        ball_pinpoint =D=> charge
+        ball_pinpoint =C=> grab
+        ball_pinpoint =S=> grab
+        ball_pinpoint =F=>look_ball
+        
+        grab: GetGrabDist()
+        grab =D=> Forward() =C=> detect_robot
+
+        detect_robot: CheckForRobot()
+        detect_robot =S=> replan
+        detect_robot =F=> have_ball
+        replan: ReplanPath()
+        replan =C=> have_ball
+
+        have_ball: UpdateMemory()
+        have_ball =C=> find_goal
 
         find_goal: goal_detection()
-        find_goal =S=> find
+        find_goal =S=> aim
         find_goal =F=> scan_goal
 
         scan_goal: Turn(45)
-        scan_goal =C=> loop
-
-        find: ball_detection()
-        find =D=> charge
-        find =S=> aim
-        find =F=> look_ball
-
-        look_ball: Turn(30)
-        look_ball =C=> loop
-
-        charge: TurnToward()
-        charge =C=> grab
-        charge =F=> grab
-
-        grab: GetGrabDist()
-        grab =D=> Forward() =C=> aim
+        scan_goal =T(2.0)=> have_ball
 
         aim: AimAtGoal()
         aim =D=> Turn() =C=> kicker
