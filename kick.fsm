@@ -171,11 +171,8 @@ class GetGrabDist(StateNode):
     """Drive the full distance INTO the ball so the front magnet grabs it."""
     def start(self, event=None):
         super().start(event)
-        if getattr(self.parent, "ball_control_guess", False):
-            dist = 25
-        else:
-            d = getattr(self.parent.ball, "sensor_distance", None)
-            dist = (d + 20) if d else 100
+        d = getattr(self.parent.ball, "sensor_distance", None)
+        dist = (d + 20) if d else 100
         print(f"[GRAB] driving {dist:.0f} mm into ball")
         self.post_data(max(dist, 20))
 
@@ -199,29 +196,10 @@ class FaceGoal(StateNode):
               f"-> turn {turn:.0f} deg")
         self.post_data(turn)
 
-class ResetBallControl(StateNode):
-    def start(self, event=None):
-        super().start(event)
-        self.parent.ball_control_guess = False
-        self.post_completion()
-
-class StoreBall(StateNode):
-    def start(self, event=None):
-        super().start(event)
-        # event.data contains the ball object from ball_detection
-        self.parent.ball = event.data
-        self.post_completion()
-
-class ResetBallControl(StateNode):
-    def start(self, event=None):
-        super().start(event)
-        self.parent.ball_control_guess = False
-        self.post_completion()
 
 class kick(StateMachineProgram):
     def __init__(self):
         super().__init__(launch_cam_viewer=True, launch_worldmap_viewer=True)
-        self.field_memory = FieldMemory1(stale_timeout=30.0)
         self.field_memory = FieldMemory1(stale_timeout=30.0)
         self.ball = None
         self.aim_turn = 0
@@ -238,17 +216,11 @@ class kick(StateMachineProgram):
         scan_ball =F=> scan_ball       # nothing after a full sweep -> sweep again
 
         charge: TurnToward()
-        charge =C=> ball_pinpoint
-        charge =F=> ball_pinpoint
-        
-        ball_pinpoint: ball_detection()
-        ball_pinpoint =D=> charge
-        ball_pinpoint =C=> grab
-        ball_pinpoint =S=> grab
-        ball_pinpoint =F=>look_ball
-        
+        charge =C=> grab
         grab: GetGrabDist()
         grab =D=> Forward() =C=> search
+
+
 
         search: UpdateMemory()
         search =C=> check_goal
@@ -258,7 +230,7 @@ class kick(StateMachineProgram):
         search_turn: Turn(30)
         search_turn =C=> search_pause
         search_pause: StateNode()
-        search_pause =T(0.5)=> search       # stop 1.5s so the camera can see the barrels
+        search_pause =T(1.5)=> search       # stop 1.5s so the camera can see the barrels
 
         face: FaceGoal()
         face =D=> Turn() =C=> kicker
